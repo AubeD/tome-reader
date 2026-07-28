@@ -1208,6 +1208,7 @@ class TomeView extends FileView {
 		let startY = 0;
 		let startT = 0;
 		let moved = true;
+		let lastTurnT = 0;
 		const down = (x: number, y: number) => {
 			startX = x;
 			startY = y;
@@ -1219,6 +1220,8 @@ class TomeView extends FileView {
 		};
 		const up = (x: number) => {
 			if (moved || Date.now() - startT > 350) return;
+			// страховка от задвоенных событий: один тап — одно перелистывание
+			if (Date.now() - lastTurnT < 250) return;
 			try {
 				const sel = win.getSelection?.();
 				if (sel && !sel.isCollapsed) return; // идёт выделение
@@ -1230,41 +1233,45 @@ class TomeView extends FileView {
 				// координата внутри видимой страницы: iframe шире контейнера
 				const visX = x - (containerEl?.scrollLeft ?? 0);
 				const band = Platform.isMobile ? 0.26 : 0.2;
-				if (visX < w * band) this.turnPageDir("prev");
-				else if (visX > w * (1 - band)) this.turnPageDir("next");
+				if (visX < w * band) {
+					lastTurnT = Date.now();
+					this.turnPageDir("prev");
+				} else if (visX > w * (1 - band)) {
+					lastTurnT = Date.now();
+					this.turnPageDir("next");
+				}
 			} catch (e) {
 				/* noop */
 			}
 		};
+		// pointer-события едины для пальца/пера/мыши — в отличие от связки
+		// touch+mouse, где браузер досылает «синтетические» события мыши
+		// после тапа и одно касание листало страницу дважды
 		doc.addEventListener(
-			"touchstart",
-			(e: TouchEvent) => {
-				const t = e.touches[0];
-				if (t) down(t.clientX, t.clientY);
+			"pointerdown",
+			(e: PointerEvent) => {
+				if (!e.isPrimary) {
+					moved = true; // второй палец = жест, не тап
+					return;
+				}
+				down(e.clientX, e.clientY);
 			},
 			{ passive: true }
 		);
 		doc.addEventListener(
-			"touchmove",
-			(e: TouchEvent) => {
-				const t = e.touches[0];
-				if (t) move(t.clientX, t.clientY);
+			"pointermove",
+			(e: PointerEvent) => {
+				if (e.buttons > 0) move(e.clientX, e.clientY);
 			},
 			{ passive: true }
 		);
 		doc.addEventListener(
-			"touchend",
-			(e: TouchEvent) => {
-				const t = e.changedTouches[0];
-				if (t) up(t.clientX);
+			"pointerup",
+			(e: PointerEvent) => {
+				if (e.isPrimary) up(e.clientX);
 			},
 			{ passive: true }
 		);
-		doc.addEventListener("mousedown", (e: MouseEvent) => down(e.clientX, e.clientY));
-		doc.addEventListener("mousemove", (e: MouseEvent) => {
-			if (e.buttons) move(e.clientX, e.clientY);
-		});
-		doc.addEventListener("mouseup", (e: MouseEvent) => up(e.clientX));
 	}
 
 	// штатный next() у epub.js при неровной ширине контента пропускает
