@@ -479,10 +479,6 @@ class TomeView extends FileView {
 		// ── область чтения ──
 		const readerWrap = container.createDiv({ cls: "tome-reader-wrap" });
 		const readerEl = readerWrap.createDiv({ cls: "tome-reader" });
-		const navPrev = readerWrap.createDiv({ cls: "tome-nav tome-nav-prev" });
-		navPrev.createSpan({ text: "‹" });
-		const navNext = readerWrap.createDiv({ cls: "tome-nav tome-nav-next" });
-		navNext.createSpan({ text: "›" });
 
 		// ── панель Aa (создаётся скрытой) ──
 		this.buildAaPanel(readerWrap);
@@ -519,6 +515,13 @@ class TomeView extends FileView {
 			readerEl.setText(L.openFail + String(e));
 			return;
 		}
+
+		// зоны-накладки по краям перекрывали начало строк и мешали выделять
+		// первые слова — тапы ловим внутри самой страницы: короткий тап у края
+		// листает, длинное нажатие и выделение всегда достаются тексту
+		(this.rendition as any).hooks?.content?.register((contents: any) => {
+			this.attachTapTurning(contents);
+		});
 
 		await this.applyAppearance(false);
 
@@ -590,13 +593,6 @@ class TomeView extends FileView {
 			}
 		});
 
-		const turnPage = (dir: "prev" | "next") => {
-			if (!this.rendition) return;
-			this.animateTurn(dir);
-			if (dir === "prev") void this.rendition.prev();
-			else void this.turnNext();
-		};
-
 		const keyHandler = (e: KeyboardEvent) => {
 			const target = e.target as HTMLElement | null;
 			if (
@@ -606,14 +602,12 @@ class TomeView extends FileView {
 					target.isContentEditable)
 			)
 				return; // печатаем в поле — страницы не трогаем
-			if (e.key === "ArrowLeft") turnPage("prev");
-			if (e.key === "ArrowRight" || e.key === " ") turnPage("next");
+			if (e.key === "ArrowLeft") this.turnPageDir("prev");
+			if (e.key === "ArrowRight" || e.key === " ") this.turnPageDir("next");
 		};
 		this.rendition.on("keydown", keyHandler);
 		this.registerDomEvent(container, "keydown", keyHandler);
 
-		navPrev.onclick = () => turnPage("prev");
-		navNext.onclick = () => turnPage("next");
 		tocBtn.onclick = () => this.toggleToc();
 		aaBtn.onclick = () => this.toggleAaPanel();
 		aiHeaderBtn.onclick = () => this.openBookAi();
@@ -1195,6 +1189,82 @@ class TomeView extends FileView {
 		const label = this.pendingSelection.replace(/\s+/g, " ").trim().slice(0, 60);
 		await this.addBookmark(cfi, label || "—");
 		this.hideSelection();
+	}
+
+	turnPageDir(dir: "prev" | "next") {
+		if (!this.rendition) return;
+		this.animateTurn(dir);
+		if (dir === "prev") void this.rendition.prev();
+		else void this.turnNext();
+	}
+
+	// короткий тап у левого/правого края страницы = перелистывание;
+	// движение, длинное нажатие и активное выделение страницу не листают
+	attachTapTurning(contents: any) {
+		const doc: Document | undefined = contents?.document;
+		const win: Window | undefined = contents?.window;
+		if (!doc || !win) return;
+		let startX = 0;
+		let startY = 0;
+		let startT = 0;
+		let moved = true;
+		const down = (x: number, y: number) => {
+			startX = x;
+			startY = y;
+			startT = Date.now();
+			moved = false;
+		};
+		const move = (x: number, y: number) => {
+			if (Math.abs(x - startX) > 10 || Math.abs(y - startY) > 10) moved = true;
+		};
+		const up = (x: number) => {
+			if (moved || Date.now() - startT > 350) return;
+			try {
+				const sel = win.getSelection?.();
+				if (sel && !sel.isCollapsed) return; // идёт выделение
+				if (this.selectionBar?.isShown()) return; // открыта панель выделения
+				const mgr: any = (this.rendition as any)?.manager;
+				const containerEl: HTMLElement | undefined = mgr?.container;
+				const w = containerEl?.offsetWidth ?? 0;
+				if (!w) return;
+				// координата внутри видимой страницы: iframe шире контейнера
+				const visX = x - (containerEl?.scrollLeft ?? 0);
+				const band = Platform.isMobile ? 0.26 : 0.2;
+				if (visX < w * band) this.turnPageDir("prev");
+				else if (visX > w * (1 - band)) this.turnPageDir("next");
+			} catch (e) {
+				/* noop */
+			}
+		};
+		doc.addEventListener(
+			"touchstart",
+			(e: TouchEvent) => {
+				const t = e.touches[0];
+				if (t) down(t.clientX, t.clientY);
+			},
+			{ passive: true }
+		);
+		doc.addEventListener(
+			"touchmove",
+			(e: TouchEvent) => {
+				const t = e.touches[0];
+				if (t) move(t.clientX, t.clientY);
+			},
+			{ passive: true }
+		);
+		doc.addEventListener(
+			"touchend",
+			(e: TouchEvent) => {
+				const t = e.changedTouches[0];
+				if (t) up(t.clientX);
+			},
+			{ passive: true }
+		);
+		doc.addEventListener("mousedown", (e: MouseEvent) => down(e.clientX, e.clientY));
+		doc.addEventListener("mousemove", (e: MouseEvent) => {
+			if (e.buttons) move(e.clientX, e.clientY);
+		});
+		doc.addEventListener("mouseup", (e: MouseEvent) => up(e.clientX));
 	}
 
 	// штатный next() у epub.js при неровной ширине контента пропускает

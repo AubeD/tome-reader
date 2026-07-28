@@ -77,51 +77,6 @@
 	border: none;
 }
 
-/* ── зоны перелистывания ── */
-.tome-nav {
-	position: absolute;
-	top: 0;
-	bottom: 0;
-	width: 18%;
-	display: flex;
-	align-items: center;
-	cursor: pointer;
-	z-index: 5;
-	color: var(--tome-fg, var(--text-normal));
-	-webkit-tap-highlight-color: transparent;
-}
-
-.tome-nav span {
-	font-size: 34px;
-	opacity: 0;
-	transition: opacity 0.15s ease;
-	padding: 0 10px;
-	user-select: none;
-}
-
-.tome-nav:hover span {
-	opacity: 0.45;
-}
-
-.tome-nav:active span {
-	opacity: 0.7;
-}
-
-.tome-nav-prev {
-	left: 0;
-	justify-content: flex-start;
-}
-
-.tome-nav-next {
-	right: 0;
-	justify-content: flex-end;
-}
-
-/* планшет/телефон: зоны чуть шире, стрелки не мозолят глаза */
-.is-mobile .tome-nav {
-	width: 22%;
-}
-
 /* ── общие кнопки ── */
 .tome-btn {
 	background: transparent;
