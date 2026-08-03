@@ -1,6 +1,6 @@
-# 📖 Tome
+# 📖 Tome Reader
 
-A beautiful e-book reader for [Obsidian](https://obsidian.md). Read your EPUB library right inside your vault — and turn reading into notes: capture quotes with your thoughts and grow a vocabulary with flashcard-ready entries. Works on desktop **and mobile**.
+A beautiful e-book reader for [Obsidian](https://obsidian.md) — *Tome* for short. Read your EPUB library right inside your vault — and turn reading into notes: capture quotes with your thoughts and grow a vocabulary with flashcard-ready entries. Works on desktop **and mobile**.
 
 > Built by a humanities person who wanted her library to feel like a library.
 
