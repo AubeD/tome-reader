@@ -4,6 +4,18 @@ A beautiful e-book reader for [Obsidian](https://obsidian.md) — *Tome* for sho
 
 > Built by a humanities person who wanted her library to feel like a library.
 
+![Parchment theme on desktop](docs/screenshots/hero-parchment-desktop.png)
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Selection to dictionary with target chips](docs/screenshots/selection-dictionary-chips.png)<br>*Select a word → pick a dictionary → save a flashcard-ready entry* | ![Spoiler-safe AI recap](docs/screenshots/ai-recap.png)<br>*“What happened so far?” — a spoiler-safe recap built only from what you've already read* |
+| ![Table of contents with pinned bookmarks](docs/screenshots/toc-bookmarks-search.png)<br>*TOC panel: pinned bookmarks on top, chapter search below* | ![Aa panel](docs/screenshots/aa-panel.png)<br>*Theme, font size, spacing and text color — right in the reader* |
+| ![Gray Fog theme on a tablet](docs/screenshots/gray-fog-tablet.jpg)<br>*Gray Fog theme on a tablet* | ![Aa panel on a tablet](docs/screenshots/aa-panel-tablet.jpg)<br>*Tuned for touch* |
+
+*Screenshots show the Russian UI — English is the default (switch anytime in settings).*
+
 ## Features
 
 ### Reading
