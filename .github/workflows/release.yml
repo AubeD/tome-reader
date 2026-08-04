@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   build:
@@ -22,6 +24,16 @@ jobs:
         run: |
           npm ci
           npm run build
+
+      # Lets users cryptographically verify the release assets were built from
+      # this repository by this workflow.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
 
       - name: Create release
         env:

@@ -1,10 +1,11 @@
 /* Tome — e-book reader for Obsidian */
 
-.tome-view {
+/* Two classes outrank Obsidian's own .view-content padding without !important */
+.view-content.tome-view {
 	display: flex;
 	flex-direction: column;
 	height: 100%;
-	padding: 0 !important;
+	padding: 0;
 	background: var(--tome-bg, var(--background-primary));
 }
 

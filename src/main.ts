@@ -1,5 +1,6 @@
 import {
 	App,
+	ButtonComponent,
 	FileView,
 	Notice,
 	Platform,
@@ -7,7 +8,6 @@ import {
 	PluginSettingTab,
 	Setting,
 	TFile,
-	TFolder,
 	WorkspaceLeaf,
 	debounce,
 	normalizePath,
@@ -34,6 +34,151 @@ interface TomeBookmark {
 	cfi: string;
 	label: string;
 	created: number;
+}
+
+// Minimal shapes for the epub.js internals the reader relies on: the library
+// leaves them untyped, and Tome needs precise page positions, spine access and
+// rendered documents to place notes, bookmarks and chapter jumps.
+interface EpubLocationEdge {
+	cfi?: string;
+	href?: string;
+}
+
+interface EpubLocation {
+	start?: EpubLocationEdge;
+	end?: EpubLocationEdge;
+}
+
+interface EpubSection {
+	href?: string;
+	index?: number;
+	document?: Document;
+	load?: (request?: unknown) => Promise<unknown>;
+	unload?: () => void;
+	cfiFromElement?: (el: Element) => string;
+}
+
+interface EpubContents {
+	document?: Document;
+	window?: Window;
+	range?: (cfi: string) => Range | null;
+	cfiFromNode?: (node: Node) => string;
+}
+
+interface EpubManager {
+	container?: HTMLElement;
+	layout?: { delta?: number };
+	settings?: { direction?: string };
+	scrollBy?: (x: number, y: number, silent?: boolean) => void;
+}
+
+interface EpubRenditionInternals {
+	manager?: EpubManager;
+	hooks?: { content?: { register: (fn: (contents: EpubContents) => void) => void } };
+	currentLocation?: () => EpubLocation | undefined;
+	reportLocation?: () => void;
+	resize?: (width: number, height: number) => void;
+	getContents?: () => EpubContents[];
+}
+
+interface EpubBookInternals {
+	spine?: { spineItems?: EpubSection[]; items?: EpubSection[] };
+	load?: (path: string) => Promise<unknown>;
+}
+
+interface EpubNavItem {
+	label?: string;
+	href?: string;
+	subitems?: EpubNavItem[];
+}
+
+interface EpubNavigation {
+	toc?: EpubNavItem[];
+}
+
+// Both provider dialects the AI assistant speaks: OpenAI-compatible chat
+// completions and the Anthropic messages API.
+interface AiChatResponse {
+	stop_reason?: string;
+	content?: { type?: string; text?: string }[];
+	choices?: { message?: { content?: string } }[];
+}
+
+interface TomeStrings {
+	themes: Record<TomeTheme, string>;
+	toc: string;
+	tocFilter: string;
+	aaTitle: string;
+	aaSize: string;
+	aaSpacing: string;
+	aaTextColor: string;
+	aaReset: string;
+	toNote: string;
+	toDict: string;
+	save: string;
+	back: string;
+	phNote: string;
+	phDict: string;
+	extTaken: string;
+	readFail: string;
+	openFail: string;
+	dictMissing: (path: string) => string;
+	nAddedNote: (book: string, hasComment: boolean) => string;
+	nAddedDict: (word: string, translation: string) => string;
+	noteIntro: (book: string) => string;
+	noteHeading: string;
+	stLanguage: string;
+	stLanguageDesc: string;
+	stTheme: string;
+	stThemeDesc: string;
+	stFontSize: string;
+	stLineHeight: string;
+	stFont: string;
+	stFontDesc: string;
+	stFontPh: string;
+	stTurnAnim: string;
+	stTurnAnimDesc: string;
+	stNoteFolder: string;
+	stNoteFolderDesc: string;
+	stDicts: string;
+	stDictsDesc: string;
+	addDict: string;
+	dictTo: string;
+	dictNone: string;
+	tocFail: string;
+	tocBuilt: (count: number) => string;
+	aiBtn: string;
+	aiTranslate: string;
+	aiExplain: string;
+	aiRecap: string;
+	phAsk: string;
+	aiThinking: string;
+	aiReading: string;
+	aiNoText: string;
+	aiNoKey: string;
+	aiRefusal: string;
+	aiEmpty: string;
+	aiRecapLabel: string;
+	nSavedAi: (book: string) => string;
+	bmSection: string;
+	bmAdded: string;
+	phEdit: string;
+	editSaved: string;
+	editNotFound: string;
+	editAmbiguous: string;
+	editFail: string;
+	stAiTest: string;
+	stAiTestOk: string;
+	stAi: string;
+	stAiDesc: string;
+	stAiOff: string;
+	stAiCustom: string;
+	stAiPreset: string;
+	stAiUrl: string;
+	stAiModel: string;
+	stAiModelDesc: string;
+	stAiKey: string;
+	stAiKeyDesc: string;
 }
 
 interface TomeSettings {
@@ -97,7 +242,7 @@ const THEMES: Record<TomeTheme, ThemeSpec> = {
 	"gray-fog": { background: "#14151a", color: "#b9bcc7", accent: "#c0392b" },
 };
 
-const STRINGS: Record<Lang, any> = {
+const STRINGS: Record<Lang, TomeStrings> = {
 	en: {
 		themes: {
 			"classic-light": "Classic Light",
@@ -274,7 +419,7 @@ export default class TomePlugin extends Plugin {
 
 		try {
 			this.registerExtensions(["epub"], VIEW_TYPE_EPUB);
-		} catch (e) {
+		} catch {
 			new Notice(this.t().extTaken);
 		}
 
@@ -282,7 +427,7 @@ export default class TomePlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		const data: any = (await this.loadData()) ?? {};
+		const data = ((await this.loadData()) ?? {}) as Partial<TomeSettings> & { dictFile?: string };
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 		if (!this.settings.locations) this.settings.locations = {};
 		if (!Array.isArray(this.settings.dictFiles)) this.settings.dictFiles = [];
@@ -307,8 +452,21 @@ export default class TomePlugin extends Plugin {
 		true
 	);
 
-	t(): any {
+	t(): TomeStrings {
 		return STRINGS[this.settings.language] ?? STRINGS.en;
+	}
+
+	// Providers report failures either as {error: {message}} or {error: "text"}
+	describeApiError(payload: unknown): string {
+		if (!payload || typeof payload !== "object") return "";
+		const error = (payload as { error?: unknown }).error;
+		if (typeof error === "string") return error.slice(0, 300);
+		if (error && typeof error === "object") {
+			const message = (error as { message?: unknown }).message;
+			if (typeof message === "string") return message.slice(0, 300);
+			return JSON.stringify(error).slice(0, 300);
+		}
+		return "";
 	}
 
 	aiReady(): boolean {
@@ -326,7 +484,7 @@ export default class TomePlugin extends Plugin {
 		const isAnthropic = s.aiPreset === "anthropic";
 		const url = isAnthropic ? base + "/v1/messages" : base + "/chat/completions";
 		const headers: Record<string, string> = { "Content-Type": "application/json" };
-		let body: any;
+		let body: Record<string, unknown>;
 		if (isAnthropic) {
 			headers["x-api-key"] = s.aiKey.trim();
 			headers["anthropic-version"] = "2023-06-01";
@@ -357,25 +515,21 @@ export default class TomePlugin extends Plugin {
 		});
 		if (res.status < 200 || res.status >= 300) {
 			let msg = "HTTP " + res.status;
-			try {
-				const j: any = res.json;
-				const detail = j?.error?.message ?? j?.error ?? "";
-				if (detail) msg += ": " + String(typeof detail === "string" ? detail : JSON.stringify(detail)).slice(0, 300);
-			} catch (e) {
-				if (res.text) msg += ": " + res.text.slice(0, 200);
-			}
+			const detail = this.describeApiError(res.json as unknown);
+			if (detail) msg += ": " + detail;
+			else if (res.text) msg += ": " + res.text.slice(0, 200);
 			throw new Error(msg);
 		}
-		let data: any;
+		let data: AiChatResponse;
 		try {
-			data = res.json;
-		} catch (e) {
+			data = res.json as AiChatResponse;
+		} catch {
 			throw new Error(L.aiEmpty);
 		}
 		let text = "";
 		if (isAnthropic) {
 			if (data?.stop_reason === "refusal") throw new Error(L.aiRefusal);
-			const blocks: any[] = Array.isArray(data?.content) ? data.content : [];
+			const blocks = data?.content ?? [];
 			text = blocks
 				.filter((b) => b?.type === "text")
 				.map((b) => String(b.text ?? ""))
@@ -441,6 +595,16 @@ class TomeView extends FileView {
 		this.plugin = plugin;
 		this.allowNoFile = false;
 		this.navigation = true;
+	}
+
+	// epub.js exposes the reading position, spine and rendered documents only
+	// through untyped internals; these accessors keep the casts in one place.
+	rd(): EpubRenditionInternals | null {
+		return this.rendition as unknown as EpubRenditionInternals | null;
+	}
+
+	bk(): EpubBookInternals | null {
+		return this.book as unknown as EpubBookInternals | null;
 	}
 
 	getViewType(): string {
@@ -519,7 +683,7 @@ class TomeView extends FileView {
 		// зоны-накладки по краям перекрывали начало строк и мешали выделять
 		// первые слова — тапы ловим внутри самой страницы: короткий тап у края
 		// листает, длинное нажатие и выделение всегда достаются тексту
-		(this.rendition as any).hooks?.content?.register((contents: any) => {
+		this.rd()?.hooks?.content?.register((contents: EpubContents) => {
 			this.attachTapTurning(contents);
 		});
 
@@ -528,7 +692,7 @@ class TomeView extends FileView {
 		const savedCfi = this.plugin.settings.locations[file.path];
 		try {
 			await this.rendition.display(savedCfi || undefined);
-		} catch (e) {
+		} catch {
 			await this.rendition.display();
 		}
 
@@ -547,11 +711,11 @@ class TomeView extends FileView {
 				if (Math.abs(w - lastW) < 2 && (!heightMatters || Math.abs(h - lastH) < 2)) return;
 				lastW = w;
 				lastH = h;
-				const loc = (this.rendition as any)?.currentLocation?.();
+				const loc = this.rd()?.currentLocation?.();
 				const cfi = String(loc?.start?.cfi ?? "");
 				try {
-					(this.rendition as any).resize(w, h);
-				} catch (e) {
+					this.rd()?.resize?.(w, h);
+				} catch {
 					/* noop */
 				}
 				// resize у epub.js может уронить позицию на начало главы — возвращаем
@@ -565,30 +729,31 @@ class TomeView extends FileView {
 		this.resizeObs.observe(readerEl);
 
 		// ── события ──
-		this.rendition.on("relocated", (location: any) => {
+		this.rendition.on("relocated", (location: EpubLocation) => {
 			const cfi: string | undefined = location?.start?.cfi;
 			if (cfi && this.file) this.plugin.saveLocation(this.file.path, cfi);
 			this.updateProgress(location);
 		});
 
-		this.rendition.on("selected", (cfiRange: string, contents: any) => {
+		this.rendition.on("selected", (cfiRange: string, contents: EpubContents) => {
 			try {
 				const sel = contents?.window?.getSelection?.();
 				const text = sel ? String(sel.toString()).trim() : "";
 				let para = "";
 				try {
 					// абзац вокруг выделения — контекст для AI-перевода/пояснения
-					const node: any = sel?.anchorNode;
-					const el = node ? (node.nodeType === 3 ? node.parentElement : node) : null;
-					para = String(el?.closest?.("p, li, blockquote, div")?.textContent ?? "")
+					const node: Node | null = sel?.anchorNode ?? null;
+					const el =
+						node instanceof Element ? node : (node?.parentElement ?? null);
+					para = String(el?.closest("p, li, blockquote, div")?.textContent ?? "")
 						.replace(/\s+/g, " ")
 						.trim()
 						.slice(0, 600);
-				} catch (e) {
+				} catch {
 					/* noop */
 				}
 				if (text) this.showSelection(text, para, String(cfiRange ?? ""));
-			} catch (e) {
+			} catch {
 				/* noop */
 			}
 		});
@@ -616,8 +781,8 @@ class TomeView extends FileView {
 		this.flatToc = [];
 		this.flatTocGenerated = false;
 		void this.book.loaded.navigation
-			.then(async (nav: any) => {
-				const walk = (items: any[], depth: number) => {
+			.then(async (nav: EpubNavigation) => {
+				const walk = (items: EpubNavItem[], depth: number) => {
 					for (const it of items ?? []) {
 						this.flatToc.push({
 							label: String(it?.label ?? "").trim(),
@@ -653,7 +818,7 @@ class TomeView extends FileView {
 			.then(() => this.book!.locations.generate(1024))
 			.then(() => {
 				this.locationsReady = true;
-				const loc = (this.rendition as any)?.currentLocation?.();
+				const loc = this.rd()?.currentLocation?.();
 				if (loc) this.updateProgress(loc);
 			})
 			.catch(() => {});
@@ -744,7 +909,7 @@ class TomeView extends FileView {
 
 	refreshAaPanel() {
 		if (!this.aaPanel) return;
-		const input = this.aaPanel.querySelector(".tome-color-input") as HTMLInputElement | null;
+		const input = this.aaPanel.querySelector<HTMLInputElement>(".tome-color-input");
 		if (input)
 			input.value = this.plugin.settings.customTextColor || THEMES[this.plugin.settings.theme].color;
 	}
@@ -962,7 +1127,7 @@ class TomeView extends FileView {
 		let excerpt = "";
 		try {
 			excerpt = await this.getTextBeforePosition(12000);
-		} catch (e) {
+		} catch {
 			/* noop */
 		}
 		this.aiBusy = false;
@@ -1021,18 +1186,18 @@ class TomeView extends FileView {
 
 	// текст до текущей позиции читателя (без спойлеров) — контекст для AI
 	async getTextBeforePosition(maxChars: number): Promise<string> {
-		const loc = (this.rendition as any)?.currentLocation?.();
+		const loc = this.rd()?.currentLocation?.();
 		const startHref = String(loc?.start?.href ?? "");
 		const cfi = String(loc?.start?.cfi ?? "");
-		const spine: any = (this.book as any)?.spine;
-		const items: any[] = spine?.spineItems ?? [];
+		const spine = this.bk()?.spine;
+		const items: EpubSection[] = spine?.spineItems ?? [];
 		if (!items.length) return "";
 		let curIdx = items.findIndex((it) => this.samePath(String(it?.href ?? ""), startHref));
 		if (curIdx < 0) curIdx = 0;
 		let text = "";
 		// текущий файл — только до позиции чтения
 		try {
-			const contents: any[] = (this.rendition as any)?.getContents?.() ?? [];
+			const contents: EpubContents[] = this.rd()?.getContents?.() ?? [];
 			for (const c of contents) {
 				const doc: Document | undefined = c?.document;
 				if (!doc?.body) continue;
@@ -1045,25 +1210,25 @@ class TomeView extends FileView {
 						r.setEnd(range.startContainer, range.startOffset);
 						upTo = r.toString();
 					}
-				} catch (e) {
+				} catch {
 					/* noop */
 				}
 				if (!upTo) upTo = String(doc.body.textContent ?? "");
 				text = upTo;
 				break;
 			}
-		} catch (e) {
+		} catch {
 			/* noop */
 		}
 		// предыдущие файлы, пока не наберём maxChars
 		for (let i = curIdx - 1; i >= 0 && text.length < maxChars; i--) {
 			const sec = items[i];
 			try {
-				await sec.load((this.book as any).load.bind(this.book));
+				await sec.load?.(this.bk()?.load?.bind(this.book));
 				const t = String(sec.document?.body?.textContent ?? "");
 				sec.unload?.();
 				text = t + "\n" + text;
-			} catch (e) {
+			} catch {
 				/* noop */
 			}
 		}
@@ -1173,7 +1338,7 @@ class TomeView extends FileView {
 
 	// закладка «я сейчас здесь» — из кнопки в шапке
 	async addBookmarkHere() {
-		const loc = (this.rendition as any)?.currentLocation?.();
+		const loc = this.rd()?.currentLocation?.();
 		const cfi = String(loc?.start?.cfi ?? "");
 		const pct = String(this.progressEl?.textContent ?? "").trim();
 		const label = [this.currentChapter || this.file?.basename || "", pct]
@@ -1184,7 +1349,7 @@ class TomeView extends FileView {
 
 	// закладка на выделенном фрагменте — подписью служит сам текст
 	async addSelectionBookmark() {
-		const loc = (this.rendition as any)?.currentLocation?.();
+		const loc = this.rd()?.currentLocation?.();
 		const cfi = this.pendingCfiRange || String(loc?.start?.cfi ?? "");
 		const label = this.pendingSelection.replace(/\s+/g, " ").trim().slice(0, 60);
 		await this.addBookmark(cfi, label || "—");
@@ -1200,7 +1365,7 @@ class TomeView extends FileView {
 
 	// короткий тап у левого/правого края страницы = перелистывание;
 	// движение, длинное нажатие и активное выделение страницу не листают
-	attachTapTurning(contents: any) {
+	attachTapTurning(contents: EpubContents) {
 		const doc: Document | undefined = contents?.document;
 		const win: Window | undefined = contents?.window;
 		if (!doc || !win) return;
@@ -1226,7 +1391,7 @@ class TomeView extends FileView {
 				const sel = win.getSelection?.();
 				if (sel && !sel.isCollapsed) return; // идёт выделение
 				if (this.selectionBar?.isShown()) return; // открыта панель выделения
-				const mgr: any = (this.rendition as any)?.manager;
+				const mgr = this.rd()?.manager;
 				const containerEl: HTMLElement | undefined = mgr?.container;
 				const w = containerEl?.offsetWidth ?? 0;
 				if (!w) return;
@@ -1240,7 +1405,7 @@ class TomeView extends FileView {
 					lastTurnT = Date.now();
 					this.turnPageDir("next");
 				}
-			} catch (e) {
+			} catch {
 				/* noop */
 			}
 		};
@@ -1281,7 +1446,7 @@ class TomeView extends FileView {
 	async turnNext() {
 		if (!this.rendition) return;
 		try {
-			const mgr: any = (this.rendition as any).manager;
+			const mgr = this.rd()?.manager;
 			const container: HTMLElement | undefined = mgr?.container;
 			const delta = Number(mgr?.layout?.delta ?? 0);
 			const rtl = mgr?.settings?.direction === "rtl";
@@ -1289,18 +1454,18 @@ class TomeView extends FileView {
 				const remaining =
 					container.scrollWidth - (container.scrollLeft + container.offsetWidth);
 				if (remaining > 2 && remaining < delta) {
-					mgr.scrollBy(delta, 0, true); // прокрутка сама обрежется по краю контента
+					mgr?.scrollBy?.(delta, 0, true); // прокрутка сама обрежется по краю контента
 					window.setTimeout(() => {
 						try {
-							(this.rendition as any)?.reportLocation?.();
-						} catch (e) {
+							this.rd()?.reportLocation?.();
+						} catch {
 							/* noop */
 						}
 					}, 60);
 					return;
 				}
 			}
-		} catch (e) {
+		} catch {
 			/* noop — падаем на штатное перелистывание */
 		}
 		await this.rendition.next();
@@ -1309,7 +1474,7 @@ class TomeView extends FileView {
 	// лёгкая анимация перелистывания — опция, по умолчанию выключена
 	animateTurn(dir: "prev" | "next") {
 		if (!this.plugin.settings.turnAnimation) return;
-		const el = this.contentEl.querySelector(".tome-reader") as HTMLElement | null;
+		const el = this.contentEl.querySelector<HTMLElement>(".tome-reader");
 		if (!el || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 		el.removeClass("tome-turn-next");
 		el.removeClass("tome-turn-prev");
@@ -1328,7 +1493,7 @@ class TomeView extends FileView {
 			return;
 		}
 		try {
-			const loc = (this.rendition as any)?.currentLocation?.();
+			const loc = this.rd()?.currentLocation?.();
 			const sec = this.findSpineItem(String(loc?.start?.href ?? ""));
 			if (!sec?.href) throw new Error(L.editNotFound);
 			const data = await this.app.vault.readBinary(this.file);
@@ -1365,12 +1530,12 @@ class TomeView extends FileView {
 	}
 
 	async realignPage() {
-		const loc = (this.rendition as any)?.currentLocation?.();
+		const loc = this.rd()?.currentLocation?.();
 		const cfi = loc?.start?.cfi;
 		if (cfi) {
 			try {
 				await this.rendition?.display(cfi);
-			} catch (e) {
+			} catch {
 				/* noop */
 			}
 		}
@@ -1384,7 +1549,7 @@ class TomeView extends FileView {
 			if (!this.app.vault.getAbstractFileByPath(cur)) {
 				try {
 					await this.app.vault.createFolder(cur);
-				} catch (e) {
+				} catch {
 					/* уже есть */
 				}
 			}
@@ -1472,13 +1637,13 @@ class TomeView extends FileView {
 
 	// ─────────────────── прогресс / TOC / оформление ───────────────────
 
-	updateProgress(location: any) {
+	updateProgress(location: EpubLocation | undefined) {
 		const href: string | undefined = location?.start?.href;
 		let label = "";
 		if (href && this.book) {
 			try {
 				label = this.book.navigation?.get(href)?.label?.trim() ?? "";
-			} catch (e) {
+			} catch {
 				label = "";
 			}
 			if (!label && this.flatTocGenerated) {
@@ -1550,8 +1715,8 @@ class TomeView extends FileView {
 		if (this.tocFilterEl) this.tocFilterEl.value = "";
 		this.renderTocList();
 		this.tocPanel.show();
-		const cur = this.tocListEl?.querySelector(".is-current");
-		if (cur) (cur as HTMLElement).scrollIntoView({ block: "center" });
+		const cur = this.tocListEl?.querySelector<HTMLElement>(".is-current");
+		cur?.scrollIntoView({ block: "center" });
 	}
 
 	hideToc() {
@@ -1586,7 +1751,7 @@ class TomeView extends FileView {
 				};
 			});
 		}
-		const loc = (this.rendition as any)?.currentLocation?.();
+		const loc = this.rd()?.currentLocation?.();
 		const curHref = String(loc?.start?.href ?? "");
 		const curCfi = String(loc?.start?.cfi ?? "");
 		const genCurrent = this.flatTocGenerated ? this.genTocCurrentIndex(curHref, curCfi) : -1;
@@ -1624,8 +1789,8 @@ class TomeView extends FileView {
 	// h1–h4 + полностью жирные абзацы вида «Глава 228. Наниматель»
 	async generateTocFromHeadings(): Promise<TocEntry[]> {
 		if (!this.book) return [];
-		const spine: any = (this.book as any).spine;
-		const items: any[] = spine?.spineItems ?? [];
+		const spine = this.bk()?.spine;
+		const items: EpubSection[] = spine?.spineItems ?? [];
 		const entries: TocEntry[] = [];
 		const seen = new Set<string>();
 		const chapterRe =
@@ -1634,7 +1799,7 @@ class TomeView extends FileView {
 		for (const sec of items) {
 			if (entries.length >= 2000) break;
 			try {
-				await sec.load((this.book as any).load.bind(this.book));
+				await sec.load?.(this.bk()?.load?.bind(this.book));
 				const doc: Document | undefined = sec.document;
 				if (!doc?.body) continue;
 				const nodes = Array.from(doc.body.querySelectorAll("h1, h2, h3, h4, p"));
@@ -1674,7 +1839,7 @@ class TomeView extends FileView {
 					let cfi = "";
 					try {
 						cfi = String(sec.cfiFromElement?.(anchorEl) ?? "");
-					} catch (e) {
+					} catch {
 						/* noop */
 					}
 					entries.push({
@@ -1686,7 +1851,7 @@ class TomeView extends FileView {
 					});
 				}
 				sec.unload?.();
-			} catch (e) {
+			} catch {
 				/* noop */
 			}
 		}
@@ -1698,10 +1863,10 @@ class TomeView extends FileView {
 		const item = this.findSpineItem(curHref);
 		const curIdx: number = typeof item?.index === "number" ? item.index : -1;
 		if (curIdx < 0) return -1;
-		let cmp: any = null;
+		let cmp: EpubCFI | null = null;
 		try {
 			cmp = new EpubCFI();
-		} catch (e) {
+		} catch {
 			/* noop */
 		}
 		let best = -1;
@@ -1719,7 +1884,7 @@ class TomeView extends FileView {
 				}
 				try {
 					if (cmp.compare(en.cfi, curCfi) <= 0) best = i;
-				} catch (e) {
+				} catch {
 					/* noop */
 				}
 			}
@@ -1765,7 +1930,7 @@ class TomeView extends FileView {
 		try {
 			await this.rendition!.display(target);
 			return true;
-		} catch (e) {
+		} catch {
 			return false;
 		}
 	}
@@ -1774,7 +1939,7 @@ class TomeView extends FileView {
 		let s = String(p ?? "");
 		try {
 			s = decodeURIComponent(s);
-		} catch (e) {
+		} catch {
 			/* оставляем как есть */
 		}
 		return s
@@ -1793,9 +1958,9 @@ class TomeView extends FileView {
 
 	// строгий поиск файла спайна: точное совпадение → совпадение по границе
 	// сегмента → равенство имени файла (никаких «похожих хвостов»)
-	findSpineItem(path: string): any | null {
-		const spine: any = (this.book as any)?.spine;
-		const items: any[] = spine?.spineItems ?? spine?.items ?? [];
+	findSpineItem(path: string): EpubSection | null {
+		const spine = this.bk()?.spine;
+		const items: EpubSection[] = spine?.spineItems ?? spine?.items ?? [];
 		const target = this.normPath(path);
 		if (!target) return null;
 		let match = items.find((it) => this.normPath(it?.href) === target);
@@ -1816,7 +1981,7 @@ class TomeView extends FileView {
 	async settleAnchor(frag: string, target: string) {
 		await new Promise((r) => window.setTimeout(r, 180));
 		try {
-			const contents: any[] = (this.rendition as any)?.getContents?.() ?? [];
+			const contents: EpubContents[] = this.rd()?.getContents?.() ?? [];
 			for (const c of contents) {
 				const doc: Document | undefined = c?.document;
 				if (!doc) continue;
@@ -1829,7 +1994,7 @@ class TomeView extends FileView {
 				}
 			}
 			await this.tryDisplay(target);
-		} catch (e) {
+		} catch {
 			/* noop */
 		}
 	}
@@ -1862,7 +2027,7 @@ class TomeView extends FileView {
 		this.contentEl.style.setProperty("--tome-accent", t.accent);
 
 		if (redisplay) {
-			const loc = (this.rendition as any)?.currentLocation?.();
+			const loc = this.rd()?.currentLocation?.();
 			const cfi = loc?.start?.cfi;
 			if (cfi) await this.rendition.display(cfi);
 		}
@@ -1873,12 +2038,12 @@ class TomeView extends FileView {
 		this.resizeObs = null;
 		try {
 			this.rendition?.destroy();
-		} catch (e) {
+		} catch {
 			/* noop */
 		}
 		try {
 			this.book?.destroy();
-		} catch (e) {
+		} catch {
 			/* noop */
 		}
 		this.rendition = null;
@@ -1924,9 +2089,9 @@ class TomeSettingTab extends PluginSettingTab {
 					.addOption("en", "English")
 					.addOption("ru", "Русский")
 					.setValue(this.plugin.settings.language)
-					.onChange(async (v) => {
+					.onChange((v) => {
 						this.plugin.settings.language = v as Lang;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 						this.display();
 					})
 			);
@@ -1938,9 +2103,9 @@ class TomeSettingTab extends PluginSettingTab {
 				(Object.keys(THEMES) as TomeTheme[]).forEach((key) =>
 					dd.addOption(key, L.themes[key])
 				);
-				dd.setValue(this.plugin.settings.theme).onChange(async (v) => {
+				dd.setValue(this.plugin.settings.theme).onChange((v) => {
 					this.plugin.settings.theme = v as TomeTheme;
-					await this.plugin.saveSettings();
+					void this.plugin.saveSettings();
 					this.plugin.applySettingsToOpenViews();
 				});
 			});
@@ -1951,10 +2116,9 @@ class TomeSettingTab extends PluginSettingTab {
 				sl
 					.setLimits(12, 36, 1)
 					.setValue(this.plugin.settings.fontSize)
-					.setDynamicTooltip()
-					.onChange(async (v) => {
+					.onChange((v) => {
 						this.plugin.settings.fontSize = v;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 						this.plugin.applySettingsToOpenViews();
 					})
 			);
@@ -1965,10 +2129,9 @@ class TomeSettingTab extends PluginSettingTab {
 				sl
 					.setLimits(1.1, 2.4, 0.1)
 					.setValue(this.plugin.settings.lineHeight)
-					.setDynamicTooltip()
-					.onChange(async (v) => {
+					.onChange((v) => {
 						this.plugin.settings.lineHeight = v;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 						this.plugin.applySettingsToOpenViews();
 					})
 			);
@@ -1980,9 +2143,9 @@ class TomeSettingTab extends PluginSettingTab {
 				tx
 					.setPlaceholder(L.stFontPh)
 					.setValue(this.plugin.settings.fontFamily)
-					.onChange(async (v) => {
+					.onChange((v) => {
 						this.plugin.settings.fontFamily = v;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 						this.plugin.applySettingsToOpenViews();
 					})
 			);
@@ -1991,9 +2154,9 @@ class TomeSettingTab extends PluginSettingTab {
 			.setName(L.stTurnAnim)
 			.setDesc(L.stTurnAnimDesc)
 			.addToggle((tg) =>
-				tg.setValue(this.plugin.settings.turnAnimation).onChange(async (v) => {
+				tg.setValue(this.plugin.settings.turnAnimation).onChange((v) => {
 					this.plugin.settings.turnAnimation = v;
-					await this.plugin.saveSettings();
+					void this.plugin.saveSettings();
 				})
 			);
 
@@ -2003,9 +2166,9 @@ class TomeSettingTab extends PluginSettingTab {
 			.addText((tx) =>
 				tx
 					.setValue(this.plugin.settings.noteFolder)
-					.onChange(async (v) => {
+					.onChange((v) => {
 						this.plugin.settings.noteFolder = v.trim() || DEFAULT_SETTINGS.noteFolder;
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 			);
 
@@ -2014,26 +2177,26 @@ class TomeSettingTab extends PluginSettingTab {
 		this.plugin.settings.dictFiles.forEach((path, idx) => {
 			new Setting(containerEl).addText((tx) => {
 				tx.inputEl.addClass("tome-input-wide");
-				tx.setValue(path).onChange(async (v) => {
+				tx.setValue(path).onChange((v) => {
 					this.plugin.settings.dictFiles[idx] = v.trim();
-					await this.plugin.saveSettings();
+					void this.plugin.saveSettings();
 				});
 			}).addExtraButton((btn) =>
 				btn
 					.setIcon("x")
 					.setTooltip("✕")
-					.onClick(async () => {
+					.onClick(() => {
 						this.plugin.settings.dictFiles.splice(idx, 1);
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 						this.display();
 					})
 			);
 		});
 
 		new Setting(containerEl).addButton((btn) =>
-			btn.setButtonText(L.addDict).onClick(async () => {
+			btn.setButtonText(L.addDict).onClick(() => {
 				this.plugin.settings.dictFiles.push("");
-				await this.plugin.saveSettings();
+				void this.plugin.saveSettings();
 				this.display();
 			})
 		);
@@ -2048,14 +2211,14 @@ class TomeSettingTab extends PluginSettingTab {
 				.addOption("anthropic", "Anthropic (Claude)")
 				.addOption("custom", L.stAiCustom)
 				.setValue(this.plugin.settings.aiPreset)
-				.onChange(async (v) => {
+				.onChange((v) => {
 					this.plugin.settings.aiPreset = v;
 					const p = AI_PRESETS[v];
 					if (p) {
 						if (p.url) this.plugin.settings.aiBaseUrl = p.url;
 						if (p.model) this.plugin.settings.aiModel = p.model;
 					}
-					await this.plugin.saveSettings();
+					void this.plugin.saveSettings();
 					this.display();
 				});
 		});
@@ -2063,9 +2226,9 @@ class TomeSettingTab extends PluginSettingTab {
 		if (this.plugin.settings.aiPreset) {
 			new Setting(containerEl).setName(L.stAiUrl).addText((tx) => {
 				tx.inputEl.addClass("tome-input-wide");
-				tx.setValue(this.plugin.settings.aiBaseUrl).onChange(async (v) => {
+				tx.setValue(this.plugin.settings.aiBaseUrl).onChange((v) => {
 					this.plugin.settings.aiBaseUrl = v.trim();
-					await this.plugin.saveSettings();
+					void this.plugin.saveSettings();
 				});
 			});
 
@@ -2073,9 +2236,9 @@ class TomeSettingTab extends PluginSettingTab {
 				.setName(L.stAiModel)
 				.setDesc(L.stAiModelDesc)
 				.addText((tx) =>
-					tx.setValue(this.plugin.settings.aiModel).onChange(async (v) => {
+					tx.setValue(this.plugin.settings.aiModel).onChange((v) => {
 						this.plugin.settings.aiModel = v.trim();
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					})
 				);
 
@@ -2085,28 +2248,33 @@ class TomeSettingTab extends PluginSettingTab {
 				.addText((tx) => {
 					tx.inputEl.type = "password";
 					tx.inputEl.addClass("tome-input-wide");
-					tx.setValue(this.plugin.settings.aiKey).onChange(async (v) => {
+					tx.setValue(this.plugin.settings.aiKey).onChange((v) => {
 						this.plugin.settings.aiKey = v.trim();
-						await this.plugin.saveSettings();
+						void this.plugin.saveSettings();
 					});
 				});
 
 			new Setting(containerEl).addButton((btn) =>
-				btn.setButtonText(L.stAiTest).onClick(async () => {
-					btn.setDisabled(true);
-					try {
-						const r = await this.plugin.aiChat(
-							"You are a connectivity test. Reply with exactly: OK",
-							"ping"
-						);
-						new Notice(L.stAiTestOk + r.slice(0, 40));
-					} catch (e) {
-						new Notice("Tome AI: " + String((e as Error)?.message ?? e));
-					} finally {
-						btn.setDisabled(false);
-					}
+				btn.setButtonText(L.stAiTest).onClick(() => {
+					void this.testConnection(btn);
 				})
 			);
+		}
+	}
+
+	async testConnection(btn: ButtonComponent) {
+		const L = this.plugin.t();
+		btn.setDisabled(true);
+		try {
+			const reply = await this.plugin.aiChat(
+				"You are a connectivity test. Reply with exactly: OK",
+				"ping"
+			);
+			new Notice(L.stAiTestOk + reply.slice(0, 40));
+		} catch (e) {
+			new Notice("Tome AI: " + String((e as Error)?.message ?? e));
+		} finally {
+			btn.setDisabled(false);
 		}
 	}
 }

@@ -1,6 +1,6 @@
 {
 	"name": "tome-reader",
-	"version": "0.7.5",
+	"version": "0.7.6",
 	"description": "A beautiful e-book reader plugin for Obsidian",
 	"main": "main.js",
 	"scripts": {
@@ -18,7 +18,6 @@
 	"license": "MIT",
 	"devDependencies": {
 		"@types/node": "^20.11.0",
-		"builtin-modules": "^3.3.0",
 		"esbuild": "^0.21.5",
 		"obsidian": "^1.5.7",
 		"typescript": "^5.4.5"
@@ -26,5 +25,8 @@
 	"dependencies": {
 		"epubjs": "^0.3.93",
 		"jszip": "^3.10.1"
+	},
+	"overrides": {
+		"@xmldom/xmldom": "^0.8.12"
 	}
 }
