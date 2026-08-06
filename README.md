@@ -14,8 +14,6 @@ A beautiful e-book reader for [Obsidian](https://obsidian.md) — *Tome* for sho
 | ![Table of contents with pinned bookmarks](docs/screenshots/toc-bookmarks-search.png)<br>*TOC panel: pinned bookmarks on top, chapter search below* | ![Aa panel](docs/screenshots/aa-panel.png)<br>*Theme, font size, spacing and text color — right in the reader* |
 | ![Gray Fog theme on a tablet](docs/screenshots/gray-fog-tablet.jpg)<br>*Gray Fog theme on a tablet* | ![Aa panel on a tablet](docs/screenshots/aa-panel-tablet.jpg)<br>*Tuned for touch* |
 
-*Screenshots show the Russian UI — English is the default (switch anytime in settings).*
-
 ## Features
 
 ### Reading
