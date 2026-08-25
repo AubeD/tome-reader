@@ -70,8 +70,9 @@ interface EpubContents {
 interface EpubManager {
 	container?: HTMLElement;
 	layout?: { delta?: number };
-	settings?: { direction?: string };
+	settings?: { direction?: string; gap?: number };
 	scrollBy?: (x: number, y: number, silent?: boolean) => void;
+	updateLayout?: () => void;
 }
 
 interface EpubRenditionInternals {
@@ -116,6 +117,7 @@ interface TomeStrings {
 	aaTextColor: string;
 	aaReset: string;
 	aaReadingMode: string;
+	aaJustify: string;
 	toNote: string;
 	toDict: string;
 	save: string;
@@ -145,6 +147,13 @@ interface TomeStrings {
 	stReadingModeDesc: string;
 	stReadingModePaginated: string;
 	stReadingModeScroll: string;
+	stJustifyText: string;
+	stJustifyTextDesc: string;
+	stPadding: string;
+	stPaddingDesc: string;
+	stPaddingTop: string;
+	stPaddingBottom: string;
+	stPaddingX: string;
 	stNoteFolder: string;
 	stNoteFolderDesc: string;
 	stDicts: string;
@@ -197,6 +206,10 @@ interface TomeSettings {
 	customTextColor: string; // "" = theme color
 	turnAnimation: boolean;
 	readingMode: ReadingMode;
+	justifyText: boolean;
+	paddingTop: number;
+	paddingBottom: number;
+	paddingX: number;
 	noteFolder: string;
 	dictFiles: string[];
 	lastDict: string;
@@ -218,6 +231,10 @@ const DEFAULT_SETTINGS: TomeSettings = {
 	customTextColor: "",
 	turnAnimation: false,
 	readingMode: "paginated",
+	justifyText: false,
+	paddingTop: 20,
+	paddingBottom: 20,
+	paddingX: 40,
 	noteFolder: "Books/Notes",
 	dictFiles: [],
 	lastDict: "",
@@ -267,6 +284,7 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		aaTextColor: "Text color",
 		aaReset: "Reset",
 		aaReadingMode: "Mode",
+		aaJustify: "Justify",
 		toNote: "📝 To book note",
 		toDict: "🈶 To dictionary",
 		save: "💾 Save",
@@ -296,6 +314,13 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		stReadingModeDesc: "Scroll (continuous) or Paginated (page-by-page). Tap zones work in both modes",
 		stReadingModePaginated: "Paginated",
 		stReadingModeScroll: "Scroll",
+		stJustifyText: "Force justified text",
+		stJustifyTextDesc: "Align paragraph text to both left and right edges",
+		stPadding: "Text padding",
+		stPaddingDesc: "Padding around text in pixels (applies to all open books)",
+		stPaddingTop: "Top",
+		stPaddingBottom: "Bottom",
+		stPaddingX: "Left & right",
 		stNoteFolder: "Book notes folder",
 		stNoteFolderDesc: "Where quote notes are created (selection → “To book note”)",
 		stDicts: "Dictionaries",
@@ -354,6 +379,7 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		aaTextColor: "Цвет текста",
 		aaReset: "Сброс",
 		aaReadingMode: "Режим",
+		aaJustify: "По ширине",
 		toNote: "📝 В заметку книги",
 		toDict: "🈶 В словарь",
 		save: "💾 Сохранить",
@@ -383,6 +409,13 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		stReadingModeDesc: "Прокрутка (непрерывная) или Постранично. Тап-зоны работают в обоих режимах",
 		stReadingModePaginated: "Постранично",
 		stReadingModeScroll: "Прокрутка",
+		stJustifyText: "Выравнивание по ширине",
+		stJustifyTextDesc: "Выравнивать текст абзацев по обоим краям",
+		stPadding: "Отступы текста",
+		stPaddingDesc: "Отступы вокруг текста в пикселях (применяется ко всем открытым книгам)",
+		stPaddingTop: "Сверху",
+		stPaddingBottom: "Снизу",
+		stPaddingX: "Слева и справа",
 		stNoteFolder: "Папка заметок книг",
 		stNoteFolderDesc: "Папка, в которой создаются заметки с цитатами (кнопка «В заметку книги»)",
 		stDicts: "Словари",
@@ -696,13 +729,19 @@ class TomeView extends FileView {
 			const w0 = Math.floor(readerEl.clientWidth / 2) * 2;
 			const h0 = Math.floor(readerEl.clientHeight);
 			const isScroll = this.plugin.settings.readingMode === "scroll";
+			// epub.js sets body padding-left/right = gap/2 with !important,
+			// so we pass gap = paddingX * 2 to control horizontal padding
+			const s = this.plugin.settings;
+			const gapPx = s.paddingX * 2;
 			this.rendition = this.book.renderTo(readerEl, {
 				width: w0 > 0 ? w0 : "100%",
 				height: h0 > 0 ? h0 : "100%",
 				flow: isScroll ? "scrolled" : "paginated",
 				spread: "none",
+				gap: gapPx,
 				allowScriptedContent: false,
-			});
+			// gap is accepted by epub.js but missing from its TypeScript types
+			} as Parameters<typeof this.book.renderTo>[1]);
 		} catch (e) {
 			readerEl.setText(L.openFail + String(e));
 			return;
@@ -960,6 +999,22 @@ class TomeView extends FileView {
 			this.plugin.settings.lineHeight = Math.min(2.4, Math.round((this.plugin.settings.lineHeight + 0.1) * 10) / 10);
 			lhVal.setText(this.plugin.settings.lineHeight.toFixed(1));
 			await this.plugin.saveSettings();
+			this.plugin.applySettingsToOpenViews();
+		};
+
+		// justify text alignment
+		const justifyRow = panel.createDiv({ cls: "tome-aa-row" });
+		justifyRow.createSpan({ cls: "tome-aa-label", text: L.aaJustify });
+		const justifyToggle = justifyRow.createEl("button", { cls: "tome-btn" });
+		const updateJustifyBtn = () => {
+			justifyToggle.setText(this.plugin.settings.justifyText ? "✓" : "✕");
+			justifyToggle.toggleClass("tome-btn-active", this.plugin.settings.justifyText);
+		};
+		updateJustifyBtn();
+		justifyToggle.onclick = async () => {
+			this.plugin.settings.justifyText = !this.plugin.settings.justifyText;
+			await this.plugin.saveSettings();
+			updateJustifyBtn();
 			this.plugin.applySettingsToOpenViews();
 		};
 
@@ -2117,18 +2172,34 @@ class TomeView extends FileView {
 			background: t.background,
 			color: textColor,
 			"line-height": String(s.lineHeight),
-			"padding-left": "1em",
-			"padding-right": "1em",
+			// top/bottom: epub.js sets "20px" (hardcoded) without !important inline,
+			// so CSS !important in themes.default overrides them
+			"padding-top": s.paddingTop + "px !important",
+			"padding-bottom": s.paddingBottom + "px !important",
 		};
 		if (s.fontFamily.trim()) body["font-family"] = s.fontFamily.trim();
+		const pStyles: Record<string, string> = {
+			color: textColor,
+			"line-height": String(s.lineHeight),
+			"text-align": s.justifyText ? "justify" : "unset",
+		};
 		this.rendition.themes.default({
 			body,
-			"p, div, span, li": { color: textColor, "line-height": String(s.lineHeight) },
+			"p, div, span, li": pStyles,
 			a: { color: t.accent },
 			"a:visited": { color: t.accent },
 			"::selection": { background: t.accent, color: t.background },
 		});
 		this.rendition.themes.fontSize(s.fontSize + "px");
+
+		// left/right: epub.js sets gap/2 with !important inline via columns().
+		// Update the gap on the manager and trigger re-layout so all views
+		// get the new padding from columns() itself.
+		const mgr = this.rd()?.manager;
+		if (mgr?.settings) {
+			mgr.settings.gap = s.paddingX * 2;
+			mgr.updateLayout?.();
+		}
 
 		this.contentEl.setAttr("data-tome-theme", s.theme);
 		this.contentEl.style.setProperty("--tome-bg", t.background);
@@ -2283,6 +2354,42 @@ class TomeSettingTab extends PluginSettingTab {
 						this.plugin.reloadAllOpenViews();
 					})
 			);
+
+		new Setting(containerEl)
+			.setName(L.stJustifyText)
+			.setDesc(L.stJustifyTextDesc)
+			.addToggle((tg) =>
+				tg.setValue(this.plugin.settings.justifyText).onChange((v) => {
+					this.plugin.settings.justifyText = v;
+					void this.plugin.saveSettings();
+					this.plugin.applySettingsToOpenViews();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName(L.stPadding)
+			.setDesc(L.stPaddingDesc)
+			.setHeading();
+
+		const paddingSides: { key: keyof TomeSettings; label: string }[] = [
+			{ key: "paddingTop", label: L.stPaddingTop },
+			{ key: "paddingBottom", label: L.stPaddingBottom },
+			{ key: "paddingX", label: L.stPaddingX },
+		];
+		for (const side of paddingSides) {
+			new Setting(containerEl)
+				.setName(side.label)
+				.addText((tx) => {
+					tx.inputEl.type = "number";
+					tx.setValue(String(this.plugin.settings[side.key]));
+					tx.onChange((v) => {
+						const n = Math.max(0, Math.min(100, parseFloat(v) || 0));
+						(this.plugin.settings[side.key] as number) = n;
+						void this.plugin.saveSettings();
+						this.plugin.applySettingsToOpenViews();
+					});
+				});
+		}
 
 		new Setting(containerEl)
 			.setName(L.stNoteFolder)
