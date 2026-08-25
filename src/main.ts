@@ -113,6 +113,7 @@ interface TomeStrings {
 	aaSpacing: string;
 	aaTextColor: string;
 	aaReset: string;
+	aaJustify: string;
 	toNote: string;
 	toDict: string;
 	save: string;
@@ -138,6 +139,8 @@ interface TomeStrings {
 	stFontPh: string;
 	stTurnAnim: string;
 	stTurnAnimDesc: string;
+	stJustifyText: string;
+	stJustifyTextDesc: string;
 	stNoteFolder: string;
 	stNoteFolderDesc: string;
 	stDicts: string;
@@ -189,6 +192,7 @@ interface TomeSettings {
 	lineHeight: number;
 	customTextColor: string; // "" = theme color
 	turnAnimation: boolean;
+	justifyText: boolean;
 	noteFolder: string;
 	dictFiles: string[];
 	lastDict: string;
@@ -209,6 +213,7 @@ const DEFAULT_SETTINGS: TomeSettings = {
 	lineHeight: 1.6,
 	customTextColor: "",
 	turnAnimation: false,
+	justifyText: false,
 	noteFolder: "Books/Notes",
 	dictFiles: [],
 	lastDict: "",
@@ -257,6 +262,7 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		aaSpacing: "Spacing",
 		aaTextColor: "Text color",
 		aaReset: "Reset",
+		aaJustify: "Justify",
 		toNote: "📝 To book note",
 		toDict: "🈶 To dictionary",
 		save: "💾 Save",
@@ -282,6 +288,8 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		stFontPh: "default",
 		stTurnAnim: "Page turn animation",
 		stTurnAnimDesc: "A light slide on page turns. When off, pages change instantly",
+		stJustifyText: "Force justified text",
+		stJustifyTextDesc: "Align paragraph text to both left and right edges",
 		stNoteFolder: "Book notes folder",
 		stNoteFolderDesc: "Where quote notes are created (selection → “To book note”)",
 		stDicts: "Dictionaries",
@@ -339,6 +347,7 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		aaSpacing: "Интервал",
 		aaTextColor: "Цвет текста",
 		aaReset: "Сброс",
+		aaJustify: "По ширине",
 		toNote: "📝 В заметку книги",
 		toDict: "🈶 В словарь",
 		save: "💾 Сохранить",
@@ -364,6 +373,8 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		stFontPh: "по умолчанию",
 		stTurnAnim: "Анимация перелистывания",
 		stTurnAnimDesc: "Лёгкий сдвиг страницы при перелистывании. Выключено — смена страниц мгновенная",
+		stJustifyText: "Выравнивание по ширине",
+		stJustifyTextDesc: "Выравнивать текст абзацев по обоим краям",
 		stNoteFolder: "Папка заметок книг",
 		stNoteFolderDesc: "Папка, в которой создаются заметки с цитатами (кнопка «В заметку книги»)",
 		stDicts: "Словари",
@@ -884,6 +895,22 @@ class TomeView extends FileView {
 			this.plugin.settings.lineHeight = Math.min(2.4, Math.round((this.plugin.settings.lineHeight + 0.1) * 10) / 10);
 			lhVal.setText(this.plugin.settings.lineHeight.toFixed(1));
 			await this.plugin.saveSettings();
+			this.plugin.applySettingsToOpenViews();
+		};
+
+		// justify text alignment
+		const justifyRow = panel.createDiv({ cls: "tome-aa-row" });
+		justifyRow.createSpan({ cls: "tome-aa-label", text: L.aaJustify });
+		const justifyToggle = justifyRow.createEl("button", { cls: "tome-btn" });
+		const updateJustifyBtn = () => {
+			justifyToggle.setText(this.plugin.settings.justifyText ? "✓" : "✕");
+			justifyToggle.toggleClass("tome-btn-active", this.plugin.settings.justifyText);
+		};
+		updateJustifyBtn();
+		justifyToggle.onclick = async () => {
+			this.plugin.settings.justifyText = !this.plugin.settings.justifyText;
+			await this.plugin.saveSettings();
+			updateJustifyBtn();
 			this.plugin.applySettingsToOpenViews();
 		};
 
@@ -2012,9 +2039,14 @@ class TomeView extends FileView {
 			"padding-right": "1em",
 		};
 		if (s.fontFamily.trim()) body["font-family"] = s.fontFamily.trim();
+		const pStyles: Record<string, string> = {
+			color: textColor,
+			"line-height": String(s.lineHeight),
+			"text-align": s.justifyText ? "justify" : "unset",
+		};
 		this.rendition.themes.default({
 			body,
-			"p, div, span, li": { color: textColor, "line-height": String(s.lineHeight) },
+			"p, div, span, li": pStyles,
 			a: { color: t.accent },
 			"a:visited": { color: t.accent },
 			"::selection": { background: t.accent, color: t.background },
@@ -2157,6 +2189,17 @@ class TomeSettingTab extends PluginSettingTab {
 				tg.setValue(this.plugin.settings.turnAnimation).onChange((v) => {
 					this.plugin.settings.turnAnimation = v;
 					void this.plugin.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName(L.stJustifyText)
+			.setDesc(L.stJustifyTextDesc)
+			.addToggle((tg) =>
+				tg.setValue(this.plugin.settings.justifyText).onChange((v) => {
+					this.plugin.settings.justifyText = v;
+					void this.plugin.saveSettings();
+					this.plugin.applySettingsToOpenViews();
 				})
 			);
 
