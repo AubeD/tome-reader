@@ -22,6 +22,8 @@ type TomeTheme = "classic-light" | "classic-dark" | "parchment" | "gray-fog";
 
 type Lang = "en" | "ru";
 
+type ReadingMode = "paginated" | "scroll";
+
 interface TocEntry {
 	label: string;
 	href: string;
@@ -113,6 +115,7 @@ interface TomeStrings {
 	aaSpacing: string;
 	aaTextColor: string;
 	aaReset: string;
+	aaReadingMode: string;
 	toNote: string;
 	toDict: string;
 	save: string;
@@ -138,6 +141,10 @@ interface TomeStrings {
 	stFontPh: string;
 	stTurnAnim: string;
 	stTurnAnimDesc: string;
+	stReadingMode: string;
+	stReadingModeDesc: string;
+	stReadingModePaginated: string;
+	stReadingModeScroll: string;
 	stNoteFolder: string;
 	stNoteFolderDesc: string;
 	stDicts: string;
@@ -189,6 +196,7 @@ interface TomeSettings {
 	lineHeight: number;
 	customTextColor: string; // "" = theme color
 	turnAnimation: boolean;
+	readingMode: ReadingMode;
 	noteFolder: string;
 	dictFiles: string[];
 	lastDict: string;
@@ -209,6 +217,7 @@ const DEFAULT_SETTINGS: TomeSettings = {
 	lineHeight: 1.6,
 	customTextColor: "",
 	turnAnimation: false,
+	readingMode: "paginated",
 	noteFolder: "Books/Notes",
 	dictFiles: [],
 	lastDict: "",
@@ -257,6 +266,7 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		aaSpacing: "Spacing",
 		aaTextColor: "Text color",
 		aaReset: "Reset",
+		aaReadingMode: "Mode",
 		toNote: "📝 To book note",
 		toDict: "🈶 To dictionary",
 		save: "💾 Save",
@@ -282,6 +292,10 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		stFontPh: "default",
 		stTurnAnim: "Page turn animation",
 		stTurnAnimDesc: "A light slide on page turns. When off, pages change instantly",
+		stReadingMode: "Reading mode",
+		stReadingModeDesc: "Scroll (continuous) or Paginated (page-by-page). Tap zones work in both modes",
+		stReadingModePaginated: "Paginated",
+		stReadingModeScroll: "Scroll",
 		stNoteFolder: "Book notes folder",
 		stNoteFolderDesc: "Where quote notes are created (selection → “To book note”)",
 		stDicts: "Dictionaries",
@@ -339,6 +353,7 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		aaSpacing: "Интервал",
 		aaTextColor: "Цвет текста",
 		aaReset: "Сброс",
+		aaReadingMode: "Режим",
 		toNote: "📝 В заметку книги",
 		toDict: "🈶 В словарь",
 		save: "💾 Сохранить",
@@ -364,6 +379,10 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		stFontPh: "по умолчанию",
 		stTurnAnim: "Анимация перелистывания",
 		stTurnAnimDesc: "Лёгкий сдвиг страницы при перелистывании. Выключено — смена страниц мгновенная",
+		stReadingMode: "Режим чтения",
+		stReadingModeDesc: "Прокрутка (непрерывная) или Постранично. Тап-зоны работают в обоих режимах",
+		stReadingModePaginated: "Постранично",
+		stReadingModeScroll: "Прокрутка",
 		stNoteFolder: "Папка заметок книг",
 		stNoteFolderDesc: "Папка, в которой создаются заметки с цитатами (кнопка «В заметку книги»)",
 		stDicts: "Словари",
@@ -549,6 +568,14 @@ export default class TomePlugin extends Plugin {
 			if (view instanceof TomeView) void view.applyAppearance(true);
 		});
 	}
+	
+	// When switching between paginated and scroll mode, a full reload is needed
+	reloadAllOpenViews() {
+		this.app.workspace.getLeavesOfType(VIEW_TYPE_EPUB).forEach((leaf) => {
+			const view = leaf.view;
+			if (view instanceof TomeView && view.file) void view.onLoadFile(view.file);
+		});
+	}
 }
 
 class TomeView extends FileView {
@@ -668,10 +695,11 @@ class TomeView extends FileView {
 			// колоночную раскладку — «проглатывается» последняя страница главы
 			const w0 = Math.floor(readerEl.clientWidth / 2) * 2;
 			const h0 = Math.floor(readerEl.clientHeight);
+			const isScroll = this.plugin.settings.readingMode === "scroll";
 			this.rendition = this.book.renderTo(readerEl, {
 				width: w0 > 0 ? w0 : "100%",
 				height: h0 > 0 ? h0 : "100%",
-				flow: "paginated",
+				flow: isScroll ? "scrolled" : "paginated",
 				spread: "none",
 				allowScriptedContent: false,
 			});
@@ -685,6 +713,28 @@ class TomeView extends FileView {
 		// листает, длинное нажатие и выделение всегда достаются тексту
 		this.rd()?.hooks?.content?.register((contents: EpubContents) => {
 			this.attachTapTurning(contents);
+			// specific style for scroll mode
+			// 1.prevent horizontal overflow (due to scroll bar)
+			// 2.append a spacer div so the last line can be scrolled higher up the screen (simple padding gets overridden by epub.js)
+			if (this.plugin.settings.readingMode === "scroll") {
+				const doc = contents?.document;
+				if (doc?.body) {
+					const mgr = this.rd()?.manager;
+					const mgrContainer = mgr?.container;
+					if (mgrContainer) mgrContainer.style.overflowX = "hidden";
+
+					let spacer = doc.getElementById("tome-scroll-spacer");
+					if (!spacer) {
+						spacer = doc.createElement("div");
+						spacer.id = "tome-scroll-spacer";
+						spacer.style.width = "100%";
+						spacer.style.pointerEvents = "none";
+						doc.body.appendChild(spacer);
+					}
+					const h = mgrContainer?.clientHeight ?? 400;
+					spacer.style.height = Math.round(h / 2) + "px";
+				}
+			}
 		});
 
 		await this.applyAppearance(false);
@@ -707,7 +757,7 @@ class TomeView extends FileView {
 				const w = Math.floor(readerEl.clientWidth / 2) * 2;
 				const h = Math.floor(readerEl.clientHeight);
 				if (w <= 0 || h <= 0) return;
-				const heightMatters = !Platform.isMobile;
+				const heightMatters = !Platform.isMobile && this.plugin.settings.readingMode !== "scroll";
 				if (Math.abs(w - lastW) < 2 && (!heightMatters || Math.abs(h - lastH) < 2)) return;
 				lastW = w;
 				lastH = h;
@@ -848,6 +898,32 @@ class TomeView extends FileView {
 				this.refreshAaPanel();
 			};
 		});
+
+		// reading mode: scroll / paginated
+		const modeRow = panel.createDiv({ cls: "tome-aa-row" });
+		modeRow.createSpan({ cls: "tome-aa-label", text: L.aaReadingMode });
+		const modePaginated = modeRow.createEl("button", { cls: "tome-btn", text: L.stReadingModePaginated });
+		const modeScroll = modeRow.createEl("button", { cls: "tome-btn", text: L.stReadingModeScroll });
+		const updateModeButtons = () => {
+			const isScroll = this.plugin.settings.readingMode === "scroll";
+			modePaginated.toggleClass("tome-btn-active", !isScroll);
+			modeScroll.toggleClass("tome-btn-active", isScroll);
+		};
+		updateModeButtons();
+		modePaginated.onclick = async () => {
+			if (this.plugin.settings.readingMode === "paginated") return;
+			this.plugin.settings.readingMode = "paginated";
+			await this.plugin.saveSettings();
+			updateModeButtons();
+			this.plugin.reloadAllOpenViews();
+		};
+		modeScroll.onclick = async () => {
+			if (this.plugin.settings.readingMode === "scroll") return;
+			this.plugin.settings.readingMode = "scroll";
+			await this.plugin.saveSettings();
+			updateModeButtons();
+			this.plugin.reloadAllOpenViews();
+		};
 
 		// размер шрифта
 		const sizeRow = panel.createDiv({ cls: "tome-aa-row" });
@@ -1358,9 +1434,36 @@ class TomeView extends FileView {
 
 	turnPageDir(dir: "prev" | "next") {
 		if (!this.rendition) return;
-		this.animateTurn(dir);
-		if (dir === "prev") void this.rendition.prev();
-		else void this.turnNext();
+		if (this.plugin.settings.readingMode === "scroll") {
+			this.scrollByViewport(dir);
+		} else {
+			this.animateTurn(dir);
+			if (dir === "prev") void this.rendition.prev();
+			else void this.turnNext();
+		}
+	}
+
+	scrollByViewport(dir: "prev" | "next") {
+		const mgr = this.rd()?.manager;
+		const container: HTMLElement | undefined = mgr?.container;
+		if (!container) return;
+		const h = container.clientHeight;
+		// distance from the edge we're moving toward:
+		// next → distance to bottom; prev → distance to top
+		const fromEdge = dir === "next"
+			? container.scrollHeight - (container.scrollTop + h)
+			: container.scrollTop;
+		if (fromEdge < 10) {
+			// at the edge — advance to next/previous chapter
+			if (dir === "next") {
+				void this.rendition?.next();
+			} else {
+				void this.rendition?.prev();
+			}
+		} else {
+			container.scrollTop += dir === "next" ? h : -h;
+		}
+		try { this.rd()?.reportLocation?.(); } catch { /* noop */ }
 	}
 
 	// короткий тап у левого/правого края страницы = перелистывание;
@@ -1393,10 +1496,16 @@ class TomeView extends FileView {
 				if (this.selectionBar?.isShown()) return; // открыта панель выделения
 				const mgr = this.rd()?.manager;
 				const containerEl: HTMLElement | undefined = mgr?.container;
-				const w = containerEl?.offsetWidth ?? 0;
+				// scroll mode: iframe width matches viewport
+				// paginated mode: iframe is wider than container (all pages
+				// side by side), adjust by scrollLeft to get visible position
+				const w = this.plugin.settings.readingMode === "scroll"
+				? (win.innerWidth || 0)
+				: (containerEl?.offsetWidth ?? 0);
 				if (!w) return;
-				// координата внутри видимой страницы: iframe шире контейнера
-				const visX = x - (containerEl?.scrollLeft ?? 0);
+				const visX = this.plugin.settings.readingMode === "scroll"
+				? x
+				: x - (containerEl?.scrollLeft ?? 0);
 				const band = Platform.isMobile ? 0.26 : 0.2;
 				if (visX < w * band) {
 					lastTurnT = Date.now();
@@ -2158,6 +2267,21 @@ class TomeSettingTab extends PluginSettingTab {
 					this.plugin.settings.turnAnimation = v;
 					void this.plugin.saveSettings();
 				})
+			);
+
+		new Setting(containerEl)
+			.setName(L.stReadingMode)
+			.setDesc(L.stReadingModeDesc)
+			.addDropdown((dd) =>
+				dd
+					.addOption("paginated", L.stReadingModePaginated)
+					.addOption("scroll", L.stReadingModeScroll)
+					.setValue(this.plugin.settings.readingMode)
+					.onChange((v) => {
+						this.plugin.settings.readingMode = v as ReadingMode;
+						void this.plugin.saveSettings();
+						this.plugin.reloadAllOpenViews();
+					})
 			);
 
 		new Setting(containerEl)
