@@ -68,8 +68,9 @@ interface EpubContents {
 interface EpubManager {
 	container?: HTMLElement;
 	layout?: { delta?: number };
-	settings?: { direction?: string };
+	settings?: { direction?: string; gap?: number };
 	scrollBy?: (x: number, y: number, silent?: boolean) => void;
+	updateLayout?: () => void;
 }
 
 interface EpubRenditionInternals {
@@ -141,6 +142,11 @@ interface TomeStrings {
 	stTurnAnimDesc: string;
 	stJustifyText: string;
 	stJustifyTextDesc: string;
+	stPadding: string;
+	stPaddingDesc: string;
+	stPaddingTop: string;
+	stPaddingBottom: string;
+	stPaddingX: string;
 	stNoteFolder: string;
 	stNoteFolderDesc: string;
 	stDicts: string;
@@ -193,6 +199,9 @@ interface TomeSettings {
 	customTextColor: string; // "" = theme color
 	turnAnimation: boolean;
 	justifyText: boolean;
+	paddingTop: number;
+	paddingBottom: number;
+	paddingX: number;
 	noteFolder: string;
 	dictFiles: string[];
 	lastDict: string;
@@ -214,6 +223,9 @@ const DEFAULT_SETTINGS: TomeSettings = {
 	customTextColor: "",
 	turnAnimation: false,
 	justifyText: false,
+	paddingTop: 20,
+	paddingBottom: 20,
+	paddingX: 40,
 	noteFolder: "Books/Notes",
 	dictFiles: [],
 	lastDict: "",
@@ -290,6 +302,11 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		stTurnAnimDesc: "A light slide on page turns. When off, pages change instantly",
 		stJustifyText: "Force justified text",
 		stJustifyTextDesc: "Align paragraph text to both left and right edges",
+		stPadding: "Text padding",
+		stPaddingDesc: "Padding around text in pixels (applies to all open books)",
+		stPaddingTop: "Top",
+		stPaddingBottom: "Bottom",
+		stPaddingX: "Left & right",
 		stNoteFolder: "Book notes folder",
 		stNoteFolderDesc: "Where quote notes are created (selection → “To book note”)",
 		stDicts: "Dictionaries",
@@ -375,6 +392,11 @@ const STRINGS: Record<Lang, TomeStrings> = {
 		stTurnAnimDesc: "Лёгкий сдвиг страницы при перелистывании. Выключено — смена страниц мгновенная",
 		stJustifyText: "Выравнивание по ширине",
 		stJustifyTextDesc: "Выравнивать текст абзацев по обоим краям",
+		stPadding: "Отступы текста",
+		stPaddingDesc: "Отступы вокруг текста в пикселях (применяется ко всем открытым книгам)",
+		stPaddingTop: "Сверху",
+		stPaddingBottom: "Снизу",
+		stPaddingX: "Слева и справа",
 		stNoteFolder: "Папка заметок книг",
 		stNoteFolderDesc: "Папка, в которой создаются заметки с цитатами (кнопка «В заметку книги»)",
 		stDicts: "Словари",
@@ -679,13 +701,19 @@ class TomeView extends FileView {
 			// колоночную раскладку — «проглатывается» последняя страница главы
 			const w0 = Math.floor(readerEl.clientWidth / 2) * 2;
 			const h0 = Math.floor(readerEl.clientHeight);
+			// epub.js sets body padding-left/right = gap/2 with !important,
+			// so we pass gap = paddingX * 2 to control horizontal padding
+			const s = this.plugin.settings;
+			const gapPx = s.paddingX * 2;
 			this.rendition = this.book.renderTo(readerEl, {
 				width: w0 > 0 ? w0 : "100%",
 				height: h0 > 0 ? h0 : "100%",
 				flow: "paginated",
 				spread: "none",
+				gap: gapPx,
 				allowScriptedContent: false,
-			});
+			// gap is accepted by epub.js but missing from its TypeScript types
+			} as Parameters<typeof this.book.renderTo>[1]);
 		} catch (e) {
 			readerEl.setText(L.openFail + String(e));
 			return;
@@ -2035,8 +2063,10 @@ class TomeView extends FileView {
 			background: t.background,
 			color: textColor,
 			"line-height": String(s.lineHeight),
-			"padding-left": "1em",
-			"padding-right": "1em",
+			// top/bottom: epub.js sets "20px" (hardcoded) without !important inline,
+			// so CSS !important in themes.default overrides them
+			"padding-top": s.paddingTop + "px !important",
+			"padding-bottom": s.paddingBottom + "px !important",
 		};
 		if (s.fontFamily.trim()) body["font-family"] = s.fontFamily.trim();
 		const pStyles: Record<string, string> = {
@@ -2052,6 +2082,15 @@ class TomeView extends FileView {
 			"::selection": { background: t.accent, color: t.background },
 		});
 		this.rendition.themes.fontSize(s.fontSize + "px");
+
+		// left/right: epub.js sets gap/2 with !important inline via columns().
+		// Update the gap on the manager and trigger re-layout so all views
+		// get the new padding from columns() itself.
+		const mgr = this.rd()?.manager;
+		if (mgr?.settings) {
+			mgr.settings.gap = s.paddingX * 2;
+			mgr.updateLayout?.();
+		}
 
 		this.contentEl.setAttr("data-tome-theme", s.theme);
 		this.contentEl.style.setProperty("--tome-bg", t.background);
@@ -2202,6 +2241,31 @@ class TomeSettingTab extends PluginSettingTab {
 					this.plugin.applySettingsToOpenViews();
 				})
 			);
+
+		new Setting(containerEl)
+			.setName(L.stPadding)
+			.setDesc(L.stPaddingDesc)
+			.setHeading();
+
+		const paddingSides: { key: keyof TomeSettings; label: string }[] = [
+			{ key: "paddingTop", label: L.stPaddingTop },
+			{ key: "paddingBottom", label: L.stPaddingBottom },
+			{ key: "paddingX", label: L.stPaddingX },
+		];
+		for (const side of paddingSides) {
+			new Setting(containerEl)
+				.setName(side.label)
+				.addText((tx) => {
+					tx.inputEl.type = "number";
+					tx.setValue(String(this.plugin.settings[side.key]));
+					tx.onChange((v) => {
+						const n = Math.max(0, Math.min(100, parseFloat(v) || 0));
+						(this.plugin.settings[side.key] as number) = n;
+						void this.plugin.saveSettings();
+						this.plugin.applySettingsToOpenViews();
+					});
+				});
+		}
 
 		new Setting(containerEl)
 			.setName(L.stNoteFolder)
