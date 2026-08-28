@@ -15,6 +15,7 @@ import {
 } from "obsidian";
 import ePub, { Book, EpubCFI, Rendition } from "epubjs";
 import JSZip from "jszip";
+import { LorebaseProgressSync } from "./progressSync";
 
 const VIEW_TYPE_EPUB = "tome-epub-view";
 
@@ -649,12 +650,14 @@ class TomeView extends FileView {
 	aiAnswer = "";
 	aiLastLabel = "";
 	aiBusy = false;
+	progressSync: LorebaseProgressSync;
 
 	constructor(leaf: WorkspaceLeaf, plugin: TomePlugin) {
 		super(leaf);
 		this.plugin = plugin;
 		this.allowNoFile = false;
 		this.navigation = true;
+		this.progressSync = new LorebaseProgressSync(this.app);
 	}
 
 	// epub.js exposes the reading position, spine and rendered documents only
@@ -724,6 +727,8 @@ class TomeView extends FileView {
 
 		try {
 			this.book = ePub(data);
+			// Begin Lorebase progress sync for this book (async, non-blocking).
+			this.progressSync.start(file, this.book);
 			// целые чётные размеры с самого старта: дробная ширина ломает
 			// колоночную раскладку — «проглатывается» последняя страница главы
 			const w0 = Math.floor(readerEl.clientWidth / 2) * 2;
@@ -822,6 +827,15 @@ class TomeView extends FileView {
 			const cfi: string | undefined = location?.start?.cfi;
 			if (cfi && this.file) this.plugin.saveLocation(this.file.path, cfi);
 			this.updateProgress(location);
+			const tocIdx = this.getCurrentTocIndex(
+				String(location?.start?.href ?? ""),
+				String(cfi ?? "")
+			);
+			this.progressSync.handleRelocated(
+				location,
+				tocIdx >= 0 ? tocIdx + 1 : 0,
+				this.flatToc.length
+			);
 		});
 
 		this.rendition.on("selected", (cfiRange: string, contents: EpubContents) => {
@@ -909,6 +923,17 @@ class TomeView extends FileView {
 				this.locationsReady = true;
 				const loc = this.rd()?.currentLocation?.();
 				if (loc) this.updateProgress(loc);
+				const locCount = this.book?.locations.length?.() ?? 0;
+				const tocIdx = this.getCurrentTocIndex(
+					String(loc?.start?.href ?? ""),
+					String(loc?.start?.cfi ?? "")
+				);
+				this.progressSync.locationsGenerated(
+					locCount,
+					loc ?? {},
+					tocIdx >= 0 ? tocIdx + 1 : 0,
+					this.flatToc.length
+				);
 			})
 			.catch(() => {});
 	}
@@ -1918,17 +1943,12 @@ class TomeView extends FileView {
 		const loc = this.rd()?.currentLocation?.();
 		const curHref = String(loc?.start?.href ?? "");
 		const curCfi = String(loc?.start?.cfi ?? "");
-		const genCurrent = this.flatTocGenerated ? this.genTocCurrentIndex(curHref, curCfi) : -1;
-		let marked = false;
+		const currentIdx = this.getCurrentTocIndex(curHref, curCfi);
 		this.flatToc.forEach((entry, i) => {
 			const row = list.createDiv({ cls: "tome-toc-item", text: entry.label || "—" });
 			row.setAttr("data-depth", String(entry.depth));
-			const isCurrent = this.flatTocGenerated
-				? i === genCurrent
-				: !marked && Boolean(curHref) && this.samePath(entry.href.split("#")[0], curHref);
-			if (isCurrent) {
+			if (i === currentIdx) {
 				row.addClass("is-current");
-				marked = true;
 			}
 			row.onclick = () => {
 				this.hideToc();
@@ -2054,6 +2074,23 @@ class TomeView extends FileView {
 			}
 		}
 		return best;
+	}
+
+	// 0-based index of the current TOC entry, or -1 if the TOC isn't ready or
+	// the current position doesn't match any entry (e.g. cover page). Uses the
+	// same logic as the TOC panel's current-chapter highlight so chapter counts
+	// stay consistent with what the reader sees.
+	getCurrentTocIndex(curHref: string, curCfi: string): number {
+		if (this.flatToc.length === 0) return -1;
+		if (this.flatTocGenerated) {
+			return this.genTocCurrentIndex(curHref, curCfi);
+		}
+		for (let i = 0; i < this.flatToc.length; i++) {
+			if (this.samePath(this.flatToc[i].href.split("#")[0], curHref)) {
+				return i;
+			}
+		}
+		return -1;
 	}
 
 	// главы в EPUB бывают прописаны «кривыми» относительными путями или якорями —
@@ -2240,6 +2277,7 @@ class TomeView extends FileView {
 	}
 
 	async closeBook() {
+		await this.progressSync.flushAndReset();
 		this.resizeObs?.disconnect();
 		this.resizeObs = null;
 		try {
