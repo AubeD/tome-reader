@@ -72,6 +72,13 @@
 .tome-reader {
 	position: absolute;
 	inset: 0;
+	/* So scroll mode margins inherit the theme's background color */
+	background: var(--tome-bg, var(--background-primary));
+}
+
+/* For scroll mode custom margins */
+.tome-reader .epub-container {
+	height: 100% !important;
 }
 
 .tome-reader iframe {

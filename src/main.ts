@@ -2168,15 +2168,23 @@ class TomeView extends FileView {
 		const s = this.plugin.settings;
 		const t = THEMES[s.theme];
 		const textColor = s.customTextColor || t.color;
+		const isScroll = s.readingMode === "scroll";
 		const body: Record<string, string> = {
 			background: t.background,
 			color: textColor,
 			"line-height": String(s.lineHeight),
-			// top/bottom: epub.js sets "20px" (hardcoded) without !important inline,
-			// so CSS !important in themes.default overrides them
-			"padding-top": s.paddingTop + "px !important",
-			"padding-bottom": s.paddingBottom + "px !important",
+			// left/right: epub.js sets padding inline without !important in scroll
+			// mode (size() shorthand) and with !important in paginated (columns()),
+			// so CSS !important covers scroll, and gap update covers paginated
+			"padding-left": s.paddingX + "px !important",
+			"padding-right": s.paddingX + "px !important",
 		};
+		if (!isScroll) {
+			// paginated: epub.js sets top/bottom to "20px" without !important,
+			// so CSS !important in themes.default overrides them
+			body["padding-top"] = s.paddingTop + "px !important";
+			body["padding-bottom"] = s.paddingBottom + "px !important";
+		}
 		if (s.fontFamily.trim()) body["font-family"] = s.fontFamily.trim();
 		const pStyles: Record<string, string> = {
 			color: textColor,
@@ -2192,9 +2200,27 @@ class TomeView extends FileView {
 		});
 		this.rendition.themes.fontSize(s.fontSize + "px");
 
+		// scroll mode: top/bottom padding must stay fixed on screen regardless of
+		// scroll position. Apply it to readerEl (the non-scrolling parent of the
+		// epub.js container). CSS .tome-reader has box-sizing: border-box and
+		// .epub-container has height:100% !important, so the container shrinks to
+		// the content box. updateLayout() → stage.size() reads container.clientHeight
+		// from the DOM, picking up the reduced height automatically.
+		const readerEl = this.contentEl.querySelector<HTMLElement>(".tome-reader");
+		if (readerEl) {
+			if (isScroll) {
+				readerEl.style.paddingTop = s.paddingTop + "px";
+				readerEl.style.paddingBottom = s.paddingBottom + "px";
+			} else {
+				readerEl.style.paddingTop = "";
+				readerEl.style.paddingBottom = "";
+			}
+		}
+
 		// left/right: epub.js sets gap/2 with !important inline via columns().
 		// Update the gap on the manager and trigger re-layout so all views
-		// get the new padding from columns() itself.
+		// get the new padding from columns() itself. In scroll mode, updateLayout
+		// also picks up the reduced container height from readerEl padding.
 		const mgr = this.rd()?.manager;
 		if (mgr?.settings) {
 			mgr.settings.gap = s.paddingX * 2;
