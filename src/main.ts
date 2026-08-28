@@ -651,6 +651,7 @@ class TomeView extends FileView {
 	aiLastLabel = "";
 	aiBusy = false;
 	progressSync: LorebaseProgressSync;
+	lastCfi = ""; // saved synchronously on every relocation, used to restore after tab switch
 
 	constructor(leaf: WorkspaceLeaf, plugin: TomePlugin) {
 		super(leaf);
@@ -658,6 +659,16 @@ class TomeView extends FileView {
 		this.allowNoFile = false;
 		this.navigation = true;
 		this.progressSync = new LorebaseProgressSync(this.app);
+		// When this tab becomes active again after being hidden, epub.js's
+		// internal state is corrupted (position drops to chapter start) even
+		// though the container dimensions are unchanged. Force a resize +
+		// position restore from the last known CFI.
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", (leaf) => {
+				if (leaf !== this.leaf) return;
+				this.onTabActivated();
+			})
+		);
 	}
 
 	// epub.js exposes the reading position, spine and rendered documents only
@@ -680,6 +691,30 @@ class TomeView extends FileView {
 
 	getDisplayText(): string {
 		return this.file ? this.file.basename : "Tome";
+	}
+
+	// Called when this leaf becomes the active tab again. epub.js corrupts its
+	// rendering position when the container is hidden (display: none), dropping
+	// to the start of the current chapter. Force a resize + redisplay at the
+	// last known CFI to restore the exact position.
+	onTabActivated() {
+		if (!this.rendition || !this.file) return;
+		const readerEl = this.contentEl.querySelector<HTMLElement>(".tome-reader");
+		if (!readerEl) return;
+		const w = Math.floor(readerEl.clientWidth / 2) * 2;
+		const h = Math.floor(readerEl.clientHeight);
+		if (w <= 0 || h <= 0) return; // still hidden — will retry on next event
+		// Force resize to rebuild epub.js's internal layout after the 0-size
+		// corruption, then restore the position from the last known CFI.
+		try {
+			this.rd()?.resize?.(w, h);
+		} catch {
+			/* noop */
+		}
+		const cfi = this.lastCfi || this.plugin.settings.locations[this.file.path] || "";
+		if (cfi) {
+			window.setTimeout(() => void this.tryDisplay(cfi), 100);
+		}
 	}
 
 	async onLoadFile(file: TFile): Promise<void> {
@@ -795,14 +830,22 @@ class TomeView extends FileView {
 		// и системных панелей, и реакция на неё превращалась в «мигание»
 		let lastW = Math.floor(readerEl.clientWidth / 2) * 2;
 		let lastH = Math.floor(readerEl.clientHeight);
+		let wasHidden = false; // tab hidden → dimensions hit 0 → epub.js corrupts position
 		const applySize = debounce(
 			() => {
 				if (!this.rendition) return;
 				const w = Math.floor(readerEl.clientWidth / 2) * 2;
 				const h = Math.floor(readerEl.clientHeight);
-				if (w <= 0 || h <= 0) return;
+				if (w <= 0 || h <= 0) {
+					// view hidden (tab switch) — record it so we force a restore on return
+					wasHidden = true;
+					return;
+				}
 				const heightMatters = !Platform.isMobile && this.plugin.settings.readingMode !== "scroll";
-				if (Math.abs(w - lastW) < 2 && (!heightMatters || Math.abs(h - lastH) < 2)) return;
+				// skip only when dimensions are unchanged AND the view wasn't hidden;
+				// after a hide/show cycle epub.js state is corrupted even at the same size
+				if (!wasHidden && Math.abs(w - lastW) < 2 && (!heightMatters || Math.abs(h - lastH) < 2)) return;
+				wasHidden = false;
 				lastW = w;
 				lastH = h;
 				const loc = this.rd()?.currentLocation?.();
@@ -825,7 +868,10 @@ class TomeView extends FileView {
 		// ── события ──
 		this.rendition.on("relocated", (location: EpubLocation) => {
 			const cfi: string | undefined = location?.start?.cfi;
-			if (cfi && this.file) this.plugin.saveLocation(this.file.path, cfi);
+			if (cfi) {
+				this.lastCfi = cfi;
+				if (this.file) this.plugin.saveLocation(this.file.path, cfi);
+			}
 			this.updateProgress(location);
 			const tocIdx = this.getCurrentTocIndex(
 				String(location?.start?.href ?? ""),
@@ -2300,6 +2346,7 @@ class TomeView extends FileView {
 		this.flatTocGenerated = false;
 		this.aiAnswer = "";
 		this.aiBusy = false;
+		this.lastCfi = "";
 	}
 
 	async onUnloadFile(file: TFile): Promise<void> {
