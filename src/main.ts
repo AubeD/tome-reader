@@ -2382,6 +2382,18 @@ class TomeSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName(L.stNoteFolder)
+			.setDesc(L.stNoteFolderDesc)
+			.addText((tx) =>
+				tx
+					.setValue(this.plugin.settings.noteFolder)
+					.onChange((v) => {
+						this.plugin.settings.noteFolder = v.trim() || DEFAULT_SETTINGS.noteFolder;
+						void this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
 			.setName(L.stJustifyText)
 			.setDesc(L.stJustifyTextDesc)
 			.addToggle((tg) =>
@@ -2416,18 +2428,6 @@ class TomeSettingTab extends PluginSettingTab {
 					});
 				});
 		}
-
-		new Setting(containerEl)
-			.setName(L.stNoteFolder)
-			.setDesc(L.stNoteFolderDesc)
-			.addText((tx) =>
-				tx
-					.setValue(this.plugin.settings.noteFolder)
-					.onChange((v) => {
-						this.plugin.settings.noteFolder = v.trim() || DEFAULT_SETTINGS.noteFolder;
-						void this.plugin.saveSettings();
-					})
-			);
 
 		new Setting(containerEl).setName(L.stDicts).setDesc(L.stDictsDesc).setHeading();
 
