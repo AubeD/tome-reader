@@ -16,6 +16,7 @@ import {
 import ePub, { Book, EpubCFI, Rendition } from "epubjs";
 import JSZip from "jszip";
 import { LorebaseProgressSync } from "./progressSync";
+import { BookNoteStorage, TomeBookmark } from "./bookNoteStorage";
 
 const VIEW_TYPE_EPUB = "tome-epub-view";
 
@@ -31,12 +32,6 @@ interface TocEntry {
 	depth: number;
 	cfi?: string; // построенные по заголовкам записи целятся точным CFI
 	idx?: number; // индекс файла в спайне — для подсветки текущей главы
-}
-
-interface TomeBookmark {
-	cfi: string;
-	label: string;
-	created: number;
 }
 
 // Minimal shapes for the epub.js internals the reader relies on: the library
@@ -464,9 +459,26 @@ const STRINGS: Record<Lang, TomeStrings> = {
 
 export default class TomePlugin extends Plugin {
 	settings: TomeSettings = DEFAULT_SETTINGS;
+	bookNoteStorage: BookNoteStorage;
 
 	async onload() {
 		await this.loadSettings();
+
+		this.bookNoteStorage = new BookNoteStorage(this.app);
+		this.register(() => this.bookNoteStorage.unload());
+
+		// One-time migration of legacy data.json locations/bookmarks to notes.
+		// Only runs when there are entries to migrate; subsequent startups
+		// see empty maps and skip entirely.
+		if (
+			Object.keys(this.settings.locations).length > 0 ||
+			Object.keys(this.settings.bookmarks).length > 0
+		) {
+			await this.bookNoteStorage.migrateAll(this.settings.locations, this.settings.bookmarks);
+			this.settings.locations = {};
+			this.settings.bookmarks = {};
+			await this.saveSettings();
+		}
 
 		this.registerView(VIEW_TYPE_EPUB, (leaf) => new TomeView(leaf, this));
 
@@ -495,15 +507,6 @@ export default class TomePlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
-
-	saveLocation = debounce(
-		(path: string, cfi: string) => {
-			this.settings.locations[path] = cfi;
-			void this.saveSettings();
-		},
-		1000,
-		true
-	);
 
 	t(): TomeStrings {
 		return STRINGS[this.settings.language] ?? STRINGS.en;
@@ -658,7 +661,7 @@ class TomeView extends FileView {
 		this.plugin = plugin;
 		this.allowNoFile = false;
 		this.navigation = true;
-		this.progressSync = new LorebaseProgressSync(this.app);
+		this.progressSync = new LorebaseProgressSync(this.app, this.plugin.bookNoteStorage);
 		// When this tab becomes active again after being hidden, epub.js's
 		// internal state is corrupted (position drops to chapter start) even
 		// though the container dimensions are unchanged. Force a resize +
@@ -711,7 +714,7 @@ class TomeView extends FileView {
 		} catch {
 			/* noop */
 		}
-		const cfi = this.lastCfi || this.plugin.settings.locations[this.file.path] || "";
+		const cfi = this.lastCfi || this.plugin.bookNoteStorage.getCfi(this.file.path) || "";
 		if (cfi) {
 			window.setTimeout(() => void this.tryDisplay(cfi), 100);
 		}
@@ -762,6 +765,9 @@ class TomeView extends FileView {
 
 		try {
 			this.book = ePub(data);
+			// Load note-backed CFI/bookmarks into the shared cache before the
+			// first display so the saved position is available.
+			this.plugin.bookNoteStorage.loadFromNote(file.path);
 			// Begin Lorebase progress sync for this book (async, non-blocking).
 			this.progressSync.start(file, this.book);
 			// целые чётные размеры с самого старта: дробная ширина ломает
@@ -818,7 +824,7 @@ class TomeView extends FileView {
 
 		await this.applyAppearance(false);
 
-		const savedCfi = this.plugin.settings.locations[file.path];
+		const savedCfi = this.plugin.bookNoteStorage.getCfi(file.path);
 		try {
 			await this.rendition.display(savedCfi || undefined);
 		} catch {
@@ -870,7 +876,11 @@ class TomeView extends FileView {
 			const cfi: string | undefined = location?.start?.cfi;
 			if (cfi) {
 				this.lastCfi = cfi;
-				if (this.file) this.plugin.saveLocation(this.file.path, cfi);
+				// In-memory CFI is updated here for synchronous tab restoration.
+				// Disk persistence is handled by progressSync's combined write.
+				if (this.file) {
+					this.plugin.bookNoteStorage.setCfiInMemory(this.file.path, cfi);
+				}
 			}
 			this.updateProgress(location);
 			const tocIdx = this.getCurrentTocIndex(
@@ -1526,15 +1536,13 @@ class TomeView extends FileView {
 	getBookmarks(): TomeBookmark[] {
 		const key = this.file?.path ?? "";
 		if (!key) return [];
-		const s = this.plugin.settings;
-		if (!s.bookmarks[key]) s.bookmarks[key] = [];
-		return s.bookmarks[key];
+		return this.plugin.bookNoteStorage.getBookmarks(key);
 	}
 
 	async addBookmark(cfi: string, label: string) {
 		if (!cfi || !this.file) return;
 		this.getBookmarks().push({ cfi, label: label.slice(0, 80), created: Date.now() });
-		await this.plugin.saveSettings();
+		await this.plugin.bookNoteStorage.persistBookmarks(this.file);
 		new Notice(this.plugin.t().bmAdded);
 	}
 
@@ -1977,7 +1985,9 @@ class TomeView extends FileView {
 				del.onclick = (ev) => {
 					ev.stopPropagation();
 					bms.splice(i, 1);
-					void this.plugin.saveSettings();
+					if (this.file) {
+						void this.plugin.bookNoteStorage.persistBookmarks(this.file);
+					}
 					this.renderTocList();
 				};
 				row.onclick = () => {

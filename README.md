@@ -24,8 +24,8 @@ A beautiful e-book reader for [Obsidian](https://obsidian.md) — *Tome* for sho
 - 📑 **Table of contents panel** with chapter search, current-chapter highlight and auto-scroll — works reliably even for books with a thousand chapters
 - 🪄 **Auto-generated TOC:** if a book ships with a broken or empty table of contents (looking at you, converted web novels), Tome scans the text and builds one from the headings — cached per book. *Note: books converted from PDF often lose heading markup entirely — Tome builds from whatever headings survived the conversion*
 - 🔖 **Reading position** remembered per book, chapter name and progress % in the header
-- � **Lorebase progress sync:** reading position is written to a Markdown book note's `page_current` / `chapter_current` frontmatter, so [Lorebase](https://github.com/Murchi1k/obsidian-lorebase-plugin) book cards and Dataview boards stay up to date automatically. A note is matched by its `book_file` field; if none exists, a minimal note is created next to the EPUB. Existing totals, status, ratings and the note body are never overwritten
-- �📌 **Bookmarks:** drop one at the current page from the header, or pin a selected passage — they live at the top of the TOC panel, one tap to jump back. Wander around the book freely; your marked spot waits for you
+- **Lorebase progress sync:** reading position is written to a Markdown book note's `page_current` / `chapter_current` / `tome_cfi` frontmatter, so [Lorebase](https://github.com/Murchi1k/obsidian-lorebase-plugin) book cards and Dataview boards stay up to date automatically. A note is matched by its `book_file` field; if none exists, a minimal note is created next to the EPUB. Existing totals, status, ratings and the note body are never overwritten
+- 📌 **Bookmarks:** drop one at the current page from the header, or pin a selected passage — they live at the top of the TOC panel, one tap to jump back. Wander around the book freely; your marked spot waits for you
 - 📱 **Mobile-friendly:** tap zones for page turns with a subtle turn animation (respects reduced-motion), tuned for tablets and phones
 
 ### Capture while you read
