@@ -22,6 +22,8 @@ export interface TomeBookmark {
 	created: number;
 }
 
+export type FrontmatterMutator = (frontmatter: Record<string, unknown>) => void;
+
 // Normalize a vault path or an in-archive href for exact comparison:
 // lowercased, forward slashes, no "." / ".." segments.
 function normPath(p: string): string {
@@ -76,6 +78,7 @@ export class BookNoteStorage {
 	private cfiCache = new Map<string, string>();
 	private bookmarkCache = new Map<string, TomeBookmark[]>();
 	private noteCache = new Map<string, TFile | null>();
+	private writeQueues = new Map<string, Promise<void>>();
 
 	// Lazily built index: normalized book_file → matching note files.
 	private index: Map<string, TFile[]> | null = null;
@@ -317,6 +320,34 @@ export class BookNoteStorage {
 		return bms;
 	}
 
+	async mutateFrontmatter(noteFile: TFile, mutator: FrontmatterMutator): Promise<void> {
+		await this.enqueueWrite(noteFile, async () => {
+			await this.app.fileManager.processFrontMatter(noteFile, (frontmatter) => {
+				mutator(frontmatter as Record<string, unknown>);
+			});
+		});
+	}
+
+	async mutateContent(noteFile: TFile, mutator: (content: string) => string): Promise<void> {
+		await this.enqueueWrite(noteFile, async () => {
+			await this.vault.process(noteFile, mutator);
+		});
+	}
+
+	private async enqueueWrite(noteFile: TFile, operation: () => Promise<void>): Promise<void> {
+		const key = noteFile.path;
+		const previous = this.writeQueues.get(key) ?? Promise.resolve();
+		const current = previous.catch(() => {}).then(operation);
+		this.writeQueues.set(key, current);
+		try {
+			await current;
+		} finally {
+			if (this.writeQueues.get(key) === current) {
+				this.writeQueues.delete(key);
+			}
+		}
+	}
+
 	// Persist bookmarks to the note's frontmatter. Called on explicit
 	// add/delete actions (not debounced — user clicks are infrequent).
 	async persistBookmarks(epubFile: TFile): Promise<void> {
@@ -326,7 +357,7 @@ export class BookNoteStorage {
 		const note = await this.resolveNote(epubFile);
 		if (!note) return;
 		try {
-			await this.app.fileManager.processFrontMatter(note, (frontmatter) => {
+			await this.mutateFrontmatter(note, (frontmatter) => {
 				frontmatter.tome_bookmarks = bms!.map((bm) => ({
 					cfi: bm.cfi,
 					label: bm.label,
@@ -384,7 +415,7 @@ export class BookNoteStorage {
 			}
 
 			try {
-				await this.app.fileManager.processFrontMatter(note, (frontmatter) => {
+				await this.mutateFrontmatter(note, (frontmatter) => {
 					// Preserve existing note-side values: don't overwrite a
 					// non-empty tome_cfi or existing tome_bookmarks with
 					// legacy data.
@@ -422,6 +453,7 @@ export class BookNoteStorage {
 		this.cfiCache.clear();
 		this.bookmarkCache.clear();
 		this.noteCache.clear();
+		this.writeQueues.clear();
 		this.index = null;
 		this.indexBuilt = false;
 	}

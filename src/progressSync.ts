@@ -12,6 +12,7 @@
 import { App, Notice, TFile, debounce } from "obsidian";
 import { Book, EpubCFI } from "epubjs";
 import { BookNoteStorage } from "./bookNoteStorage";
+import { ReadingHistoryTracker } from "./readingHistory";
 
 // Shared with TomeView: the untyped epub.js location shape both consume.
 export interface ProgressLocationEdge {
@@ -69,6 +70,7 @@ function asString(value: unknown): string {
 export class LorebaseProgressSync {
 	private app: App;
 	private storage: BookNoteStorage;
+	private history: ReadingHistoryTracker;
 	private book: Book | null = null;
 	private epubFile: TFile | null = null;
 	private noteFile: TFile | null = null;
@@ -91,9 +93,10 @@ export class LorebaseProgressSync {
 		void this.writeProgress();
 	}, SYNC_DEBOUNCE_MS, true);
 
-	constructor(app: App, storage: BookNoteStorage) {
+	constructor(app: App, storage: BookNoteStorage, history: ReadingHistoryTracker) {
 		this.app = app;
 		this.storage = storage;
+		this.history = history;
 	}
 
 	// Called when an EPUB is opened. Resets prior state and begins note
@@ -154,7 +157,7 @@ export class LorebaseProgressSync {
 		this.debouncedWrite.cancel();
 		if (!this.disabled && this.noteFile && this.lastLocation) {
 			try {
-				await this.writeProgress();
+				await this.writeProgress(true);
 			} catch (e) {
 				console.warn("Tome progress sync: final flush failed", e);
 			}
@@ -194,7 +197,7 @@ export class LorebaseProgressSync {
 	// Compute the current page/chapter from the latest location and write them
 	// together with tome_cfi to the note's frontmatter in a single
 	// processFrontMatter call. Skips the physical write when nothing changed.
-	private async writeProgress(): Promise<void> {
+	private async writeProgress(forceHistory = false): Promise<void> {
 		const noteFile = this.noteFile;
 		const epubFile = this.epubFile;
 		const book = this.book;
@@ -240,10 +243,12 @@ export class LorebaseProgressSync {
 		// Chapter info comes from TomeView's TOC, not the spine.
 		const chapterCurrent = this.pendingChapterTotal > 0 ? this.pendingChapterCurrent : 0;
 		const chapterTotal = this.pendingChapterTotal;
+		const historyMutation = this.history.prepareMutation("progress", forceHistory);
 
 		// Skip the write when nothing changed since the last successful write,
 		// including the CFI (which may change even when page/chapter don't).
 		if (
+			!historyMutation &&
 			pageCurrent === this.lastWrittenPage &&
 			chapterCurrent === this.lastWrittenChapter &&
 			chapterTotal === this.lastWrittenChapterTotal &&
@@ -259,7 +264,7 @@ export class LorebaseProgressSync {
 		const pageTotalForFill = this.resolvePageTotal(fm, internals?.locations?.length() ?? 0);
 
 		try {
-			await this.app.fileManager.processFrontMatter(noteFile, (frontmatter) => {
+			await this.storage.mutateFrontmatter(noteFile, (frontmatter) => {
 				// Always ensure book_file points at this EPUB.
 				if (isMissing(frontmatter.book_file) || asString(frontmatter.book_file) === "") {
 					frontmatter.book_file = epubFile.path;
@@ -280,12 +285,17 @@ export class LorebaseProgressSync {
 				if (writeCfi) {
 					frontmatter.tome_cfi = writeCfi;
 				}
+				historyMutation?.apply(frontmatter);
 			});
+			if (historyMutation) {
+				await historyMutation.commit(noteFile);
+			}
 			this.lastWrittenPage = writePage;
 			this.lastWrittenChapter = writeChapter;
 			this.lastWrittenChapterTotal = writeChapterTotal;
 			this.lastWrittenCfi = writeCfi;
 		} catch (e) {
+			historyMutation?.rollback();
 			console.warn("Tome progress sync: write failed", e);
 		}
 	}

@@ -17,6 +17,7 @@ import ePub, { Book, EpubCFI, Rendition } from "epubjs";
 import JSZip from "jszip";
 import { LorebaseProgressSync } from "./progressSync";
 import { BookNoteStorage, TomeBookmark } from "./bookNoteStorage";
+import { ReadingHistoryTracker } from "./readingHistory";
 
 const VIEW_TYPE_EPUB = "tome-epub-view";
 
@@ -654,6 +655,7 @@ class TomeView extends FileView {
 	aiLastLabel = "";
 	aiBusy = false;
 	progressSync: LorebaseProgressSync;
+	readingHistory: ReadingHistoryTracker;
 	lastCfi = ""; // saved synchronously on every relocation, used to restore after tab switch
 
 	constructor(leaf: WorkspaceLeaf, plugin: TomePlugin) {
@@ -661,17 +663,33 @@ class TomeView extends FileView {
 		this.plugin = plugin;
 		this.allowNoFile = false;
 		this.navigation = true;
-		this.progressSync = new LorebaseProgressSync(this.app, this.plugin.bookNoteStorage);
+		this.readingHistory = new ReadingHistoryTracker(this.app, this.plugin.bookNoteStorage);
+		this.progressSync = new LorebaseProgressSync(this.app, this.plugin.bookNoteStorage, this.readingHistory);
 		// When this tab becomes active again after being hidden, epub.js's
 		// internal state is corrupted (position drops to chapter start) even
 		// though the container dimensions are unchanged. Force a resize +
 		// position restore from the last known CFI.
 		this.registerEvent(
 			this.app.workspace.on("active-leaf-change", (leaf) => {
-				if (leaf !== this.leaf) return;
-				this.onTabActivated();
+				this.syncReadingActivity("active-leaf-change");
+				if (leaf === this.leaf) {
+					this.onTabActivated();
+				}
 			})
 		);
+		this.registerDomEvent(document, "visibilitychange", () => this.syncReadingActivity("visibilitychange"));
+		this.registerDomEvent(window, "focus", () => this.syncReadingActivity("window-focus"));
+		this.registerDomEvent(window, "blur", () => this.syncReadingActivity("window-blur"));
+	}
+
+	syncReadingActivity(reason: string) {
+		// On mobile, document.hasFocus() is unreliable — visibilitychange is
+		// the primary signal. On desktop, require focus so background windows
+		// don't count as active reading time.
+		const visible = document.visibilityState === "visible";
+		const focused = Platform.isMobile ? true : document.hasFocus();
+		const active = this.app.workspace.activeLeaf === this.leaf && visible && focused;
+		this.readingHistory.setEnvironmentActive(active, reason);
 	}
 
 	// epub.js exposes the reading position, spine and rendered documents only
@@ -721,7 +739,12 @@ class TomeView extends FileView {
 	}
 
 	async onLoadFile(file: TFile): Promise<void> {
-		await this.closeBook();
+		// If the same book is being reloaded (e.g. paginated ↔ scroll mode
+		// switch), preserve reading-history state so sub-60s sessions before
+		// the reload still count toward the threshold and aren't discarded.
+		const isReload = this.file && this.file.path === file.path;
+		const preserved = isReload ? this.readingHistory.suspendForReload() : null;
+		await this.closeBook(preserved !== null);
 		const container = this.contentEl;
 		container.empty();
 		container.addClass("tome-view");
@@ -769,6 +792,7 @@ class TomeView extends FileView {
 			// first display so the saved position is available.
 			this.plugin.bookNoteStorage.loadFromNote(file.path);
 			// Begin Lorebase progress sync for this book (async, non-blocking).
+			this.readingHistory.start(file, preserved ?? undefined);
 			this.progressSync.start(file, this.book);
 			// целые чётные размеры с самого старта: дробная ширина ломает
 			// колоночную раскладку — «проглатывается» последняя страница главы
@@ -831,6 +855,11 @@ class TomeView extends FileView {
 			await this.rendition.display();
 		}
 
+		// Sync initial reading-activity state: if this tab is already active
+		// and the document is visible/focused, the history tracker can begin
+		// counting immediately instead of waiting for the first interaction.
+		this.syncReadingActivity("onLoadFile");
+
 		// переразметка — только при реальном изменении ширины (поворот,
 		// перетаскивание панели): на планшете высота дёргается из-за клавиатуры
 		// и системных панелей, и реакция на неё превращалась в «мигание»
@@ -883,6 +912,7 @@ class TomeView extends FileView {
 				}
 			}
 			this.updateProgress(location);
+			this.readingHistory.recordInteraction("relocated");
 			const tocIdx = this.getCurrentTocIndex(
 				String(location?.start?.href ?? ""),
 				String(cfi ?? "")
@@ -928,6 +958,7 @@ class TomeView extends FileView {
 				return; // печатаем в поле — страницы не трогаем
 			if (e.key === "ArrowLeft") this.turnPageDir("prev");
 			if (e.key === "ArrowRight" || e.key === " ") this.turnPageDir("next");
+			this.readingHistory.recordInteraction("keydown");
 		};
 		this.rendition.on("keydown", keyHandler);
 		this.registerDomEvent(container, "keydown", keyHandler);
@@ -1663,6 +1694,7 @@ class TomeView extends FileView {
 					return;
 				}
 				down(e.clientX, e.clientY);
+				this.readingHistory.recordInteraction("pointerdown");
 			},
 			{ passive: true }
 		);
@@ -1678,6 +1710,12 @@ class TomeView extends FileView {
 			(e: PointerEvent) => {
 				if (e.isPrimary) up(e.clientX);
 			},
+			{ passive: true }
+		);
+		// scroll-mode reading counts as interaction too
+		doc.addEventListener(
+			"scroll",
+			() => this.readingHistory.recordInteraction("scroll"),
 			{ passive: true }
 		);
 	}
@@ -1909,6 +1947,7 @@ class TomeView extends FileView {
 				const pct = this.book.locations.percentageFromCfi(cfi);
 				if (typeof pct === "number" && !isNaN(pct)) {
 					this.progressEl.setText(Math.round(pct * 100) + "%");
+					this.readingHistory.updatePosition(pct * 100);
 					return;
 				}
 			}
@@ -2332,7 +2371,15 @@ class TomeView extends FileView {
 		}
 	}
 
-	async closeBook() {
+	async closeBook(preserveHistory = false) {
+		if (preserveHistory) {
+			// Same-book reload (mode switch): history state was already
+			// captured by suspendForReload(). Skip the flush so sub-60s
+			// pending time is preserved rather than discarded.
+			this.readingHistory.resetForReload();
+		} else {
+			await this.readingHistory.flushAndReset();
+		}
 		await this.progressSync.flushAndReset();
 		this.resizeObs?.disconnect();
 		this.resizeObs = null;
