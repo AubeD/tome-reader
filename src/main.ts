@@ -657,6 +657,10 @@ class TomeView extends FileView {
 	progressSync: LorebaseProgressSync;
 	readingHistory: ReadingHistoryTracker;
 	lastCfi = ""; // saved synchronously on every relocation, used to restore after tab switch
+	// True during the initial rendition.display() in onLoadFile. Prevents
+	// onTabActivated() (triggered by active-leaf-change firing mid-load) from
+	// calling resize(), which would clear the in-progress view via manager.clear().
+	initialDisplayInProgress = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: TomePlugin) {
 		super(leaf);
@@ -719,6 +723,12 @@ class TomeView extends FileView {
 	// to the start of the current chapter. Force a resize + redisplay at the
 	// last known CFI to restore the exact position.
 	onTabActivated() {
+		// During the initial load, active-leaf-change fires while
+		// rendition.display() is still in flight (and again right after it
+		// resolves but before the first relocated event). Calling resize()
+		// at that point would clear the view via manager.clear(), leaving an
+		// empty page with no CFI to restore. Skip until relocated fires.
+		if (this.initialDisplayInProgress) return;
 		if (!this.rendition || !this.file) return;
 		const readerEl = this.contentEl.querySelector<HTMLElement>(".tome-reader");
 		if (!readerEl) return;
@@ -745,6 +755,12 @@ class TomeView extends FileView {
 		const isReload = this.file && this.file.path === file.path;
 		const preserved = isReload ? this.readingHistory.suspendForReload() : null;
 		await this.closeBook(preserved !== null);
+		// Block onTabActivated() from firing a resize during the initial
+		// display — active-leaf-change fires mid-load and again right after
+		// display() resolves but before the first relocated event. A resize
+		// at that point would clear the just-rendered view. The flag is
+		// cleared by the relocated handler once the view is fully rendered.
+		this.initialDisplayInProgress = true;
 		const container = this.contentEl;
 		container.empty();
 		container.addClass("tome-view");
@@ -854,6 +870,15 @@ class TomeView extends FileView {
 		} catch {
 			await this.rendition.display();
 		}
+		// Keep initialDisplayInProgress=true until the first relocated event
+		// fires. active-leaf-change can fire again right after display()
+		// resolves but before the view is fully rendered + relocated, and
+		// calling resize() at that point would clear the just-rendered view
+		// with no CFI to restore it. The relocated handler clears the flag.
+		// Safety net: clear after 5s in case relocated never fires.
+		window.setTimeout(() => {
+			this.initialDisplayInProgress = false;
+		}, 5000);
 
 		// Sync initial reading-activity state: if this tab is already active
 		// and the document is visible/focused, the history tracker can begin
@@ -903,6 +928,11 @@ class TomeView extends FileView {
 		// ── события ──
 		this.rendition.on("relocated", (location: EpubLocation) => {
 			const cfi: string | undefined = location?.start?.cfi;
+			// The first relocated after initial display means the view is
+			// fully rendered — safe to allow onTabActivated() resize/restore.
+			if (this.initialDisplayInProgress) {
+				this.initialDisplayInProgress = false;
+			}
 			if (cfi) {
 				this.lastCfi = cfi;
 				// In-memory CFI is updated here for synchronous tab restoration.
@@ -2404,6 +2434,7 @@ class TomeView extends FileView {
 		this.aiAnswer = "";
 		this.aiBusy = false;
 		this.lastCfi = "";
+		this.initialDisplayInProgress = false;
 	}
 
 	async onUnloadFile(file: TFile): Promise<void> {
