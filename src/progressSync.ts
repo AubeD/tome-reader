@@ -229,7 +229,12 @@ export class LorebaseProgressSync {
 		const internals = bookInternals(book);
 		const cfi = asString(location.start?.cfi);
 
-		let pageCurrent = 0;
+		// pageCurrent is null when we can't compute it yet (locations not
+		// generated, no CFI, or no page total). In that case we leave the
+		// existing frontmatter value untouched instead of clobbering it with
+		// 0 — the CFI below is still written, so the correct page will be
+		// recomputed on the next open once epub.js finishes locations.generate.
+		let pageCurrent: number | null = null;
 		if (cfi && this.locationsReady && internals?.locations) {
 			const pct = internals.locations.percentageFromCfi(cfi);
 			if (typeof pct === "number" && !isNaN(pct)) {
@@ -247,9 +252,13 @@ export class LorebaseProgressSync {
 
 		// Skip the write when nothing changed since the last successful write,
 		// including the CFI (which may change even when page/chapter don't).
+		// A null pageCurrent means we won't touch page_current, so treat it as
+		// "unchanged" for the skip check — the write still proceeds if the
+		// CFI or chapter info changed.
+		const pageUnchanged = pageCurrent === null || pageCurrent === this.lastWrittenPage;
 		if (
 			!historyMutation &&
-			pageCurrent === this.lastWrittenPage &&
+			pageUnchanged &&
 			chapterCurrent === this.lastWrittenChapter &&
 			chapterTotal === this.lastWrittenChapterTotal &&
 			cfi === this.lastWrittenCfi
@@ -280,7 +289,11 @@ export class LorebaseProgressSync {
 					frontmatter.chapter_total = writeChapterTotal;
 				}
 				// Current position + CFI are the things we always own.
-				frontmatter.page_current = writePage;
+				// page_current is only written when we could compute it; when
+				// locations aren't ready yet we preserve whatever's there.
+				if (writePage !== null) {
+					frontmatter.page_current = writePage;
+				}
 				frontmatter.chapter_current = writeChapter;
 				if (writeCfi) {
 					frontmatter.tome_cfi = writeCfi;
@@ -290,7 +303,9 @@ export class LorebaseProgressSync {
 			if (historyMutation) {
 				await historyMutation.commit(noteFile);
 			}
-			this.lastWrittenPage = writePage;
+			if (writePage !== null) {
+				this.lastWrittenPage = writePage;
+			}
 			this.lastWrittenChapter = writeChapter;
 			this.lastWrittenChapterTotal = writeChapterTotal;
 			this.lastWrittenCfi = writeCfi;
