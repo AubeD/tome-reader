@@ -5,11 +5,44 @@ const MINIMUM_SESSION_MS = 60_000;
 const CHECKPOINT_MS = 60_000;
 const IDLE_TIMEOUT_MS = 10 * 60_000;
 const TICK_MS = 1_000;
-const VIEW_SIGNATURE = "/* tome-reading-history-v2 */";
+// Session auto-start/finish thresholds.
+// FINISH_THRESHOLD_SECONDS is the only time-threshold knob: startThreshold is
+// derived as finishThreshold / 2 at runtime, so the /2 relationship holds for
+// every wordCount (short books scale both thresholds together).
+const FINISH_PERCENT = 99.5;
+const FINISH_THRESHOLD_SECONDS = 300;
+const CONTIGUOUS_GAP_DAYS = 7;
+const PAUSED_STALE_DAYS = 14;
+const WORDS_PER_MINUTE = 350;
+const CHARS_PER_PAGE_FALLBACK = 2000;
+const WORDS_PER_PAGE_FALLBACK = 400;
+const VIEW_SIGNATURE = "/* tome-reading-history-v8 */";
 const VIEW_BLOCK = `\`\`\`dataviewjs
 ${VIEW_SIGNATURE}
 const history = dv.current().reading_history ?? [];
+const sessions = dv.current().reading_sessions ?? [];
 const totalSeconds = dv.current().reading_time_seconds ?? 0;
+const today = new Date().toISOString().slice(0, 10);
+
+// Normalize Dataview date values (JS Date or string) to YYYY-MM-DD string.
+function dateStr(v) {
+    if (!v) return "";
+    if (v instanceof Date) {
+        return v.toISOString().slice(0, 10);
+    }
+    const s = String(v);
+    if (/^\\d{4}-\\d{2}-\\d{2}/.test(s)) return s.slice(0, 10);
+    return s;
+}
+
+// Format YYYY-MM-DD as DD-MM-YYYY for display.
+function fmtDate(v) {
+    const s = dateStr(v);
+    if (!s) return "";
+    const parts = s.split("-");
+    if (parts.length !== 3) return s;
+    return parts[2] + "-" + parts[1] + "-" + parts[0];
+}
 
 function duration(seconds) {
     const s = Math.floor(seconds);
@@ -17,7 +50,6 @@ function duration(seconds) {
     const hours = Math.floor(minutes / 60);
     const remainingMinutes = minutes % 60;
     const remainingSeconds = s % 60;
-
     if (hours > 0) {
         return \`${"${hours}"}h ${"${String(remainingMinutes).padStart(2, \"0\")}"}min\`;
     } else if (minutes > 0) {
@@ -27,16 +59,93 @@ function duration(seconds) {
     }
 }
 
+function dayCount(started, finished) {
+    const a = new Date(dateStr(started) + "T00:00:00Z");
+    const b = new Date((dateStr(finished) || today) + "T00:00:00Z");
+    return Math.round((b - a) / 86400000) + 1;
+}
+
+function pct(v) {
+    return Number(v).toFixed(1) + "%";
+}
+
+// Normalize all dates in history and sessions to strings.
+const normHistory = history.map(d => ({ ...d, date: dateStr(d.date) }));
+const normSessions = sessions.map(s => ({ started: dateStr(s.started), finished: dateStr(s.finished) }));
+
+// Group days into sessions and "Other reading".
+const sortedSessions = [...normSessions].sort((a, b) => b.started.localeCompare(a.started));
+const sortedHistory = [...normHistory].sort((a, b) => a.date.localeCompare(b.date));
+
+// Assign each day to a session (first match: session.started <= day <= session.finished||today).
+function findSession(day) {
+    for (const s of normSessions) {
+        const end = s.finished || today;
+        if (day.date >= s.started && day.date <= end) return s;
+    }
+    return null;
+}
+
+const sessionDays = new Map();
+const otherDays = [];
+for (const day of sortedHistory) {
+    const s = findSession(day);
+    if (s) {
+        const key = s.started + "|" + s.finished;
+        if (!sessionDays.has(key)) sessionDays.set(key, []);
+        sessionDays.get(key).push(day);
+    } else {
+        otherDays.push(day);
+    }
+}
+
 dv.paragraph(\`**Total reading time:** ${"${duration(totalSeconds)}"}\`);
-dv.table(
-    ["Date", "Start", "End", "Duration"],
-    history.slice().reverse().map((entry) => [
-        entry.date,
-        \`${"${Number(entry.start_percent).toFixed(1)}"}%\`,
-        \`${"${Number(entry.end_percent).toFixed(1)}"}%\`,
-        duration(entry.duration_seconds),
-    ])
-);
+
+// Render each session as a collapsible <details>.
+let sessionNum = sortedSessions.length;
+for (const s of sortedSessions) {
+    const key = s.started + "|" + s.finished;
+    const days = sessionDays.get(key) || [];
+    const totalSecs = days.reduce((sum, d) => sum + d.duration_seconds, 0);
+    const dayCountVal = dayCount(s.started, s.finished);
+    const startPct = days.length > 0 ? days[0].start_percent : 0;
+    const endPct = days.length > 0 ? days[days.length - 1].end_percent : 0;
+    const isInProgress = !s.finished;
+    const label = isInProgress
+        ? \`Session ${"${sessionNum}"} \u2014 ${"${fmtDate(s.started)}"} \u2192 in progress (${"${dayCountVal}"}d, ${"${duration(totalSecs)}"}, ${"${pct(startPct)}"} \u2192 ${"${pct(endPct)}"})\`
+        : \`Session ${"${sessionNum}"} \u2014 ${"${fmtDate(s.started)}"} \u2192 ${"${fmtDate(s.finished)}"} (${"${dayCountVal}"}d, ${"${duration(totalSecs)}"}, ${"${pct(startPct)}"} \u2192 ${"${pct(endPct)}"})\`;
+    const rows = days.slice().reverse().map(d => [fmtDate(d.date), pct(d.start_percent), pct(d.end_percent), duration(d.duration_seconds)]);
+    const details = dv.container.createEl("details");
+    if (isInProgress) details.open = true;
+    details.createEl("summary", { text: label });
+    const table = details.createEl("table");
+    const thead = table.createEl("thead");
+    const headRow = thead.createEl("tr");
+    ["Date", "Start", "End", "Duration"].forEach(h => headRow.createEl("th", { text: h }));
+    const tbody = table.createEl("tbody");
+    for (const r of rows) {
+        const tr = tbody.createEl("tr");
+        r.forEach(c => tr.createEl("td", { text: c }));
+    }
+    sessionNum--;
+}
+
+// Render "Other reading" if there are ungrouped days.
+if (otherDays.length > 0) {
+    const otherSecs = otherDays.reduce((sum, d) => sum + d.duration_seconds, 0);
+    const rows = otherDays.slice().reverse().map(d => [fmtDate(d.date), pct(d.start_percent), pct(d.end_percent), duration(d.duration_seconds)]);
+    const details = dv.container.createEl("details");
+    details.createEl("summary", { text: \`Other reading (${"${otherDays.length}"}d, ${"${duration(otherSecs)}"})\` });
+    const table = details.createEl("table");
+    const thead = table.createEl("thead");
+    const headRow = thead.createEl("tr");
+    ["Date", "Start", "End", "Duration"].forEach(h => headRow.createEl("th", { text: h }));
+    const tbody = table.createEl("tbody");
+    for (const r of rows) {
+        const tr = tbody.createEl("tr");
+        r.forEach(c => tr.createEl("td", { text: c }));
+    }
+}
 \`\`\``;
 
 interface ReadingDay {
@@ -44,6 +153,11 @@ interface ReadingDay {
 	start_percent: number;
 	end_percent: number;
 	duration_seconds: number;
+}
+
+interface ReadingSession {
+	started: string;
+	finished: string; // "" = in progress
 }
 
 interface PreservedState {
@@ -97,6 +211,225 @@ function parseHistory(value: unknown): ReadingDay[] {
 		});
 	}
 	return history;
+}
+
+function parseSessions(value: unknown): ReadingSession[] {
+	if (value === undefined || value === null) {
+		return [];
+	} else if (!Array.isArray(value)) {
+		throw new Error("reading_sessions is not an array");
+	}
+	const sessions: ReadingSession[] = [];
+	for (const raw of value) {
+		if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+			throw new Error("reading_sessions contains a non-object entry");
+		}
+		const entry = raw as Record<string, unknown>;
+		const started = typeof entry.started === "string" ? entry.started.trim() : "";
+		const finishedRaw = entry.finished;
+		const finished = finishedRaw === null || finishedRaw === undefined
+			? ""
+			: typeof finishedRaw === "string" ? finishedRaw.trim() : "";
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(started)) {
+			throw new Error(`reading_sessions contains an invalid started date "${started || "unknown"}"`);
+		}
+		if (finished !== "" && !/^\d{4}-\d{2}-\d{2}$/.test(finished)) {
+			throw new Error(`reading_sessions contains an invalid finished date "${finished}"`);
+		}
+		sessions.push({ started, finished });
+	}
+	return sessions;
+}
+
+// Sum duration_seconds over reading_history entries within [started, finishedOrToday].
+function sumSessionSeconds(history: ReadingDay[], started: string, finishedOrToday: string): number {
+	let total = 0;
+	for (const entry of history) {
+		if (entry.date >= started && entry.date <= finishedOrToday) {
+			total += entry.duration_seconds;
+		}
+	}
+	return total;
+}
+
+// Return today's duration_seconds from reading_history (0 if no entry yet).
+function todaySeconds(history: ReadingDay[], today: string): number {
+	const entry = history.find((e) => e.date === today);
+	return entry ? entry.duration_seconds : 0;
+}
+
+// Walk back from today through reading_history entries with gaps <= maxGapDays.
+// Returns the earliest date in the contiguous run ending at today.
+// If today has no entry yet, returns today (the run will include it once written).
+function earliestContiguousStart(history: ReadingDay[], today: string, maxGapDays: number): string {
+	const dates = history.map((e) => e.date).sort((a, b) => a.localeCompare(b));
+	if (dates.length === 0) {
+		return today;
+	}
+	// Build the contiguous run ending at today.
+	const run: string[] = [];
+	let prev: string | null = null;
+	for (const date of dates) {
+		if (prev === null) {
+			run.push(date);
+		} else {
+			const gap = daysBetween(prev, date);
+			if (gap <= maxGapDays) {
+				run.push(date);
+			} else {
+				// Gap too large — start a new run.
+				run.length = 0;
+				run.push(date);
+			}
+		}
+		prev = date;
+	}
+	// Check if the last run includes today (or is contiguous with today).
+	if (run.length === 0) {
+		return today;
+	}
+	const lastInRun = run[run.length - 1];
+	if (lastInRun === today) {
+		return run[0];
+	}
+	// If the last entry is within maxGapDays of today, extend the run.
+	const gapToToday = daysBetween(lastInRun, today);
+	if (gapToToday <= maxGapDays) {
+		return run[0];
+	}
+	// No contiguous run reaching today — start fresh.
+	return today;
+}
+
+// Calendar days between two YYYY-MM-DD strings (b - a, positive if b > a).
+function daysBetween(a: string, b: string): number {
+	const dateA = new Date(a + "T00:00:00Z");
+	const dateB = new Date(b + "T00:00:00Z");
+	return Math.round((dateB.getTime() - dateA.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+// Resolve word count from frontmatter, falling back to page_total estimate.
+function resolveWordCount(frontmatter: Record<string, unknown>): number {
+	const explicit = asFiniteNumber(frontmatter.word_count);
+	if (explicit !== null && explicit > 0) {
+		return explicit;
+	}
+	const pageTotal = asFiniteNumber(frontmatter.page_total);
+	if (pageTotal !== null && pageTotal > 0) {
+		return pageTotal * WORDS_PER_PAGE_FALLBACK;
+	}
+	return 0;
+}
+
+// Compute finish and start thresholds from word count.
+// finishThreshold = min(FINISH_THRESHOLD_SECONDS, wordCount / 350 * 60)
+// startThreshold = finishThreshold / 2
+// When wordCount is 0/unknown, wordCount/350*60 = 0, so min picks 0 — but we
+// want the flat floor in that case. Treat 0 wordCount as +∞ so min picks the
+// constant.
+function computeThresholds(wordCount: number): { finishThreshold: number; startThreshold: number } {
+	const wordBasedSeconds = wordCount > 0 ? (wordCount / WORDS_PER_MINUTE) * 60 : Infinity;
+	const finishThreshold = Math.min(FINISH_THRESHOLD_SECONDS, wordBasedSeconds);
+	const startThreshold = finishThreshold / 2;
+	return { finishThreshold, startThreshold };
+}
+
+// Derive the mirrored status from reading_sessions.
+// - planned: no sessions
+// - watching: >=1 in-progress session (started, no finished)
+// - completed: >=1 finished session AND no in-progress session
+// (paused is set by obsidian-book-scan, not Tome — Tome only sets watching/completed/planned)
+function deriveStatus(sessions: ReadingSession[]): string {
+	if (sessions.length === 0) {
+		return "planned";
+	}
+	const hasInProgress = sessions.some((s) => s.finished === "");
+	const hasFinished = sessions.some((s) => s.finished !== "");
+	if (hasInProgress) {
+		return "watching";
+	} else if (hasFinished) {
+		return "completed";
+	} else {
+		return "planned";
+	}
+}
+
+// Recompute the mirrored started/finished/status from reading_sessions.
+// started/finished mirror the most recent session.
+function recomputeMirror(frontmatter: Record<string, unknown>, sessions: ReadingSession[]): void {
+	if (sessions.length === 0) {
+		// Don't wipe existing started/finished if there are no sessions —
+		// the user may have manual values. Only set status.
+		frontmatter.status = "planned";
+		return;
+	}
+	const latest = sessions[sessions.length - 1];
+	frontmatter.started = latest.started;
+	frontmatter.finished = latest.finished;
+	frontmatter.status = deriveStatus(sessions);
+}
+
+// Build the session mutation: evaluates auto-start/finish and applies changes
+// to frontmatter.reading_sessions + the mirrored started/finished/status.
+// Must be called AFTER the per-day history mutation has updated
+// frontmatter.reading_history, so today's duration_seconds is current.
+function applySessionMutation(
+	frontmatter: Record<string, unknown>,
+	currentPercent: number | null,
+	today: string
+): void {
+	const sessions = parseSessions(frontmatter.reading_sessions);
+	const history = parseHistory(frontmatter.reading_history);
+	const wordCount = resolveWordCount(frontmatter);
+	const { finishThreshold, startThreshold } = computeThresholds(wordCount);
+
+	// Always recompute the mirror from the (possibly hand-edited) sessions.
+	recomputeMirror(frontmatter, sessions);
+
+	// Auto-FINISH: check if the in-progress session should be closed.
+	const inProgressIdx = sessions.findIndex((s) => s.finished === "");
+	if (inProgressIdx >= 0) {
+		const session = sessions[inProgressIdx];
+		if (currentPercent !== null && currentPercent >= FINISH_PERCENT) {
+			const sessionSeconds = sumSessionSeconds(history, session.started, today);
+			if (sessionSeconds >= finishThreshold) {
+				session.finished = today;
+				frontmatter.reading_sessions = sessions;
+				recomputeMirror(frontmatter, sessions);
+				return;
+			}
+		}
+		// Session in progress but not finished — no start needed.
+		frontmatter.reading_sessions = sessions;
+		return;
+	}
+
+	// Auto-START: no in-progress session. Check if we should start one.
+	// Condition 1: sessions empty OR all finished (guaranteed by inProgressIdx < 0).
+	// Condition 2: today's duration_seconds >= startThreshold.
+	const todaySecs = todaySeconds(history, today);
+	if (todaySecs < startThreshold) {
+		frontmatter.reading_sessions = sessions;
+		return;
+	}
+	// Condition 3: 0 < currentPercent < FINISH_PERCENT.
+	if (currentPercent === null || currentPercent <= 0 || currentPercent >= FINISH_PERCENT) {
+		frontmatter.reading_sessions = sessions;
+		return;
+	}
+	// Condition 4: anti-spurious — no session finished today.
+	const finishedToday = sessions.some((s) => s.finished === today);
+	if (finishedToday) {
+		frontmatter.reading_sessions = sessions;
+		return;
+	}
+	// All conditions met — start a new session, backdating to the earliest
+	// contiguous reading day.
+	const backdatedStart = earliestContiguousStart(history, today, CONTIGUOUS_GAP_DAYS);
+	sessions.push({ started: backdatedStart, finished: "" });
+	sessions.sort((a, b) => a.started.localeCompare(b.started));
+	frontmatter.reading_sessions = sessions;
+	recomputeMirror(frontmatter, sessions);
 }
 
 function localDateKey(date: Date): string {
@@ -165,6 +498,13 @@ export class ReadingHistoryTracker {
 		}
 		this.tickTimer = window.setInterval(() => void this.tick(), TICK_MS);
 		this.log("started", { book: epubFile.path, preserved: preserved ? { openActiveMs: preserved.openActiveMs, pendingMs: preserved.pendingMs, qualified: preserved.qualified } : undefined });
+		// Ensure the DataviewJS block is present/up-to-date on open, even if
+		// no reading time accumulates (e.g. user opens and closes quickly).
+		void this.notePromise.then((noteFile) => {
+			if (noteFile) {
+				void this.ensureView(noteFile);
+			}
+		});
 	}
 
 	// Capture qualification state before a same-book reload so it can be
@@ -268,6 +608,10 @@ export class ReadingHistoryTracker {
 				frontmatter.reading_history = history;
 				frontmatter.reading_time_seconds = history.reduce((total, entry) => total + entry.duration_seconds, 0);
 				frontmatter.last_read = snapshot.lastRead;
+				// Session auto-start/finish: runs AFTER the history mutation so
+				// today's duration_seconds is current. Reads reading_sessions +
+				// reading_history + word_count/page_total from frontmatter.
+				applySessionMutation(frontmatter, this.currentPercent, snapshot.day);
 				applied = true;
 			},
 			commit: async (noteFile) => {
@@ -402,7 +746,16 @@ export class ReadingHistoryTracker {
 				const after = current.slice(sectionEnd);
 				return `${before}## Reading History\n\n${VIEW_BLOCK}\n${after}`;
 			} else {
+				// Insert before the first ## heading (e.g. ## Notes), right after
+			// the banner codeblock. If no ## heading exists, append at end.
+			const firstHeading = /^## /m.exec(current);
+			if (firstHeading && firstHeading.index !== undefined) {
+				const before = current.slice(0, firstHeading.index);
+				const after = current.slice(firstHeading.index);
+				return `${before}## Reading History\n\n${VIEW_BLOCK}\n${after}`;
+			} else {
 				return `${current.trimEnd()}\n\n## Reading History\n\n${VIEW_BLOCK}\n`;
+			}
 			}
 		});
 		this.viewEnsured = true;

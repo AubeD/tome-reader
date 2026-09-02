@@ -375,6 +375,325 @@ function testDurationFormatting(): void {
 	});
 }
 
+// ─── Session tests ──────────────────────────────────────────────────────────
+
+function testSessionAutoStart(): void {
+	console.log("\n[Test] auto-start creates a session when threshold met");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 0,
+		currentPercent: 15.0,
+		pendingMs: 200_000, // 200s > 150s startThreshold
+		qualified: true,
+		openActiveMs: 200_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	assert("mutation created", mutation !== null);
+	if (mutation) {
+		const fm: Record<string, unknown> = {
+			word_count: 80000, // normal book → finishThreshold=300, startThreshold=150
+		};
+		mutation.apply(fm);
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("session created", Array.isArray(sessions) && sessions.length === 1);
+		assert("session started today", sessions && sessions[0]?.started === "2026-09-02");
+		assert("session in progress", sessions && sessions[0]?.finished === "");
+		assert("status watching", fm.status === "watching");
+		assert("started mirrored", fm.started === "2026-09-02");
+		assert("finished mirrored", fm.finished === "");
+	}
+}
+
+function testSessionAutoStartBackdating(): void {
+	console.log("\n[Test] auto-start backdates to contiguous prior day");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 0,
+		currentPercent: 15.0,
+		pendingMs: 200_000,
+		qualified: true,
+		openActiveMs: 200_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = {
+			word_count: 80000,
+			reading_history: [
+				{ date: "2026-09-01", start_percent: 0, end_percent: 5.0, duration_seconds: 240 }, // 4min yesterday
+			],
+		};
+		mutation.apply(fm);
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("session created", Array.isArray(sessions) && sessions.length === 1);
+		assert("started backdated to yesterday", sessions && sessions[0]?.started === "2026-09-01");
+	}
+}
+
+function testSessionAutoStartNoBackdate(): void {
+	console.log("\n[Test] auto-start does not backdate across large gap");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 0,
+		currentPercent: 15.0,
+		pendingMs: 200_000,
+		qualified: true,
+		openActiveMs: 200_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = {
+			word_count: 80000,
+			reading_history: [
+				{ date: "2026-08-01", start_percent: 0, end_percent: 5.0, duration_seconds: 240 }, // 30 days ago
+			],
+		};
+		mutation.apply(fm);
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("session created", Array.isArray(sessions) && sessions.length === 1);
+		assert("started is today (no backdate)", sessions && sessions[0]?.started === "2026-09-02");
+	}
+}
+
+function testSessionAutoStartBlockedByTime(): void {
+	console.log("\n[Test] auto-start blocked when today's time below threshold");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 0,
+		currentPercent: 15.0,
+		pendingMs: 60_000, // 60s < 150s startThreshold
+		qualified: true,
+		openActiveMs: 60_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = { word_count: 80000 };
+		mutation.apply(fm);
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }> | undefined;
+		assert("no session created", !sessions || sessions.length === 0);
+	}
+}
+
+function testSessionAutoStartBlockedByInProgress(): void {
+	console.log("\n[Test] auto-start blocked when in-progress session exists");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 0,
+		currentPercent: 15.0,
+		pendingMs: 200_000,
+		qualified: true,
+		openActiveMs: 200_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = {
+			word_count: 80000,
+			reading_sessions: [{ started: "2026-08-22", finished: "" }],
+		};
+		mutation.apply(fm);
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("still one session", sessions && sessions.length === 1);
+		assert("existing session preserved", sessions && sessions[0]?.started === "2026-08-22");
+	}
+}
+
+function testSessionAutoStartBlockedByFinishedToday(): void {
+	console.log("\n[Test] auto-start blocked when a session finished today (anti-spurious)");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 0,
+		currentPercent: 15.0,
+		pendingMs: 200_000,
+		qualified: true,
+		openActiveMs: 200_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = {
+			word_count: 80000,
+			reading_sessions: [{ started: "2026-01-01", finished: "2026-09-02" }],
+		};
+		mutation.apply(fm);
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("still one session", sessions && sessions.length === 1);
+		assert("no new session started", sessions && sessions[0]?.started === "2026-01-01");
+	}
+}
+
+function testSessionAutoFinish(): void {
+	console.log("\n[Test] auto-finish closes session when threshold met");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 99.6,
+		currentPercent: 99.6,
+		pendingMs: 200_000,
+		qualified: true,
+		openActiveMs: 200_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = {
+			word_count: 80000,
+			reading_sessions: [{ started: "2026-08-22", finished: "" }],
+			reading_history: [
+				{ date: "2026-08-22", start_percent: 0, end_percent: 50.0, duration_seconds: 200 },
+				{ date: "2026-09-02", start_percent: 50.0, end_percent: 99.6, duration_seconds: 200 },
+			],
+		};
+		mutation.apply(fm);
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("session closed", sessions && sessions[0]?.finished === "2026-09-02");
+		assert("status completed", fm.status === "completed");
+		assert("finished mirrored", fm.finished === "2026-09-02");
+	}
+}
+
+function testSessionAutoFinishWithBackdatedStart(): void {
+	console.log("\n[Test] auto-finish includes time from backdated start days");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 99.6,
+		currentPercent: 99.6,
+		pendingMs: 200_000,
+		qualified: true,
+		openActiveMs: 200_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = {
+			word_count: 80000,
+			reading_sessions: [{ started: "2026-09-01", finished: "" }], // started yesterday
+			reading_history: [
+				{ date: "2026-09-01", start_percent: 0, end_percent: 50.0, duration_seconds: 200 }, // yesterday's 200s
+				{ date: "2026-09-02", start_percent: 50.0, end_percent: 99.6, duration_seconds: 200 }, // today's 200s (pre-flush)
+			],
+		};
+		mutation.apply(fm);
+		// sessionActiveSeconds = 200 (yesterday) + 200 (today pre-flush) + 200 (this flush) = 600 >= 300
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("session closed", sessions && sessions[0]?.finished === "2026-09-02");
+	}
+}
+
+function testSessionAutoFinishBlockedByTime(): void {
+	console.log("\n[Test] auto-finish blocked when session time below threshold");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 99.6,
+		currentPercent: 99.6,
+		pendingMs: 60_000, // 60s
+		qualified: true,
+		openActiveMs: 60_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = {
+			word_count: 80000, // finishThreshold = 300
+			reading_sessions: [{ started: "2026-09-02", finished: "" }],
+		};
+		mutation.apply(fm);
+		// sessionActiveSeconds = 60 (today's flush only) < 300
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("session not closed", sessions && sessions[0]?.finished === "");
+		assert("status still watching", fm.status === "watching");
+	}
+}
+
+function testSessionShortBookThreshold(): void {
+	console.log("\n[Test] short book uses scaled-down threshold");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 99.6,
+		currentPercent: 99.6,
+		pendingMs: 120_000, // 120s
+		qualified: true,
+		openActiveMs: 120_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = {
+			word_count: 700, // 700 words → 700/350*60 = 120s → finishThreshold = min(300, 120) = 120
+			reading_sessions: [{ started: "2026-09-02", finished: "" }],
+		};
+		mutation.apply(fm);
+		// sessionActiveSeconds = 120 (today's flush) >= 120 (finishThreshold)
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("short book finished", sessions && sessions[0]?.finished === "2026-09-02");
+	}
+}
+
+function testSessionFallbackNoWordCount(): void {
+	console.log("\n[Test] fallback to flat threshold when no word_count or page_total");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 0,
+		currentPercent: 15.0,
+		pendingMs: 160_000, // 160s > 150s flat startThreshold
+		qualified: true,
+		openActiveMs: 160_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = {}; // no word_count, no page_total
+		mutation.apply(fm);
+		// finishThreshold = min(300, Infinity) = 300, startThreshold = 150
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("session created with flat threshold", Array.isArray(sessions) && sessions.length === 1);
+	}
+}
+
+function testSessionMirrorConsistency(): void {
+	console.log("\n[Test] mirror fields recomputed from hand-edited sessions");
+	const storage = createMockStorage();
+	const tracker = createTracker(storage);
+	setInternalState(tracker, {
+		day: "2026-09-02",
+		dayStartPercent: 50.0,
+		currentPercent: 55.0,
+		pendingMs: 60_000, // 60s < 150s startThreshold → no auto-start
+		qualified: true,
+		openActiveMs: 60_000,
+	});
+	const mutation = extractMutation(tracker, "test", true);
+	if (mutation) {
+		const fm: Record<string, unknown> = {
+			word_count: 80000,
+			// Hand-edited: two finished sessions, no in-progress
+			reading_sessions: [
+				{ started: "2026-01-01", finished: "2026-02-15" },
+				{ started: "2026-03-01", finished: "2026-04-01" },
+			],
+		};
+		mutation.apply(fm);
+		const sessions = fm.reading_sessions as Array<{ started: string; finished: string }>;
+		assert("sessions unchanged", sessions && sessions.length === 2);
+		assert("status completed (all finished)", fm.status === "completed");
+		assert("started mirrors latest", fm.started === "2026-03-01");
+		assert("finished mirrors latest", fm.finished === "2026-04-01");
+	}
+}
+
 // ─── Run all tests ──────────────────────────────────────────────────────────
 
 async function runAll(): Promise<void> {
@@ -388,6 +707,20 @@ async function runAll(): Promise<void> {
 	testPercentClamping();
 	await testDataviewBlockInstallation();
 	await testDurationFormatting();
+
+	// Session tests
+	testSessionAutoStart();
+	testSessionAutoStartBackdating();
+	testSessionAutoStartNoBackdate();
+	testSessionAutoStartBlockedByTime();
+	testSessionAutoStartBlockedByInProgress();
+	testSessionAutoStartBlockedByFinishedToday();
+	testSessionAutoFinish();
+	testSessionAutoFinishWithBackdatedStart();
+	testSessionAutoFinishBlockedByTime();
+	testSessionShortBookThreshold();
+	testSessionFallbackNoWordCount();
+	testSessionMirrorConsistency();
 
 	const passed = results.filter((r) => r.pass).length;
 	const failed = results.filter((r) => !r.pass).length;
