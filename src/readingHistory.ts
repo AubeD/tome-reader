@@ -16,7 +16,7 @@ const PAUSED_STALE_DAYS = 14;
 const WORDS_PER_MINUTE = 350;
 const CHARS_PER_PAGE_FALLBACK = 2000;
 const WORDS_PER_PAGE_FALLBACK = 400;
-const VIEW_SIGNATURE = "/* tome-reading-history-v8 */";
+const VIEW_SIGNATURE = "/* tome-reading-history-v9 */";
 const VIEW_BLOCK = `\`\`\`dataviewjs
 ${VIEW_SIGNATURE}
 const history = dv.current().reading_history ?? [];
@@ -99,9 +99,29 @@ for (const day of sortedHistory) {
     }
 }
 
-dv.paragraph(\`**Total reading time:** ${"${duration(totalSeconds)}"}\`);
+// Container styled like the scan plugin's banner.
+const wrap = dv.container.createEl("div", { cls: "tome-reading-history" });
 
-// Render each session as a collapsible <details>.
+// Total reading time bar.
+wrap.createEl("div", { cls: "tome-rh-total", text: \`Total reading time: ${"${duration(totalSeconds)}"}\` });
+
+// Helper: build a styled table inside a parent element.
+function buildTable(parent, days) {
+    const table = parent.createEl("table", { cls: "tome-rh-table" });
+    const thead = table.createEl("thead");
+    const headRow = thead.createEl("tr");
+    ["Date", "Start", "End", "Duration"].forEach(h => headRow.createEl("th", { text: h }));
+    const tbody = table.createEl("tbody");
+    for (const d of days) {
+        const tr = tbody.createEl("tr");
+        tr.createEl("td", { text: fmtDate(d.date) });
+        tr.createEl("td", { text: pct(d.start_percent) });
+        tr.createEl("td", { text: pct(d.end_percent) });
+        tr.createEl("td", { text: duration(d.duration_seconds) });
+    }
+}
+
+// Render each session as a styled collapsible <details>.
 let sessionNum = sortedSessions.length;
 for (const s of sortedSessions) {
     const key = s.started + "|" + s.finished;
@@ -111,40 +131,29 @@ for (const s of sortedSessions) {
     const startPct = days.length > 0 ? days[0].start_percent : 0;
     const endPct = days.length > 0 ? days[days.length - 1].end_percent : 0;
     const isInProgress = !s.finished;
-    const label = isInProgress
-        ? \`Session ${"${sessionNum}"} \u2014 ${"${fmtDate(s.started)}"} \u2192 in progress (${"${dayCountVal}"}d, ${"${duration(totalSecs)}"}, ${"${pct(startPct)}"} \u2192 ${"${pct(endPct)}"})\`
-        : \`Session ${"${sessionNum}"} \u2014 ${"${fmtDate(s.started)}"} \u2192 ${"${fmtDate(s.finished)}"} (${"${dayCountVal}"}d, ${"${duration(totalSecs)}"}, ${"${pct(startPct)}"} \u2192 ${"${pct(endPct)}"})\`;
-    const rows = days.slice().reverse().map(d => [fmtDate(d.date), pct(d.start_percent), pct(d.end_percent), duration(d.duration_seconds)]);
-    const details = dv.container.createEl("details");
-    if (isInProgress) details.open = true;
-    details.createEl("summary", { text: label });
-    const table = details.createEl("table");
-    const thead = table.createEl("thead");
-    const headRow = thead.createEl("tr");
-    ["Date", "Start", "End", "Duration"].forEach(h => headRow.createEl("th", { text: h }));
-    const tbody = table.createEl("tbody");
-    for (const r of rows) {
-        const tr = tbody.createEl("tr");
-        r.forEach(c => tr.createEl("td", { text: c }));
+    const badgeCls = isInProgress ? "tome-rh-badge-progress" : "tome-rh-badge-completed";
+    const badgeText = isInProgress ? "In progress" : "Completed";
+    const details = wrap.createEl("details", { cls: "tome-rh-session" });
+    if (isInProgress) { details.open = true; }
+    const summary = details.createEl("summary");
+    const badge = summary.createEl("span", { cls: \`tome-rh-badge ${"${badgeCls}"}\`, text: badgeText });
+    summary.appendText(\` Session ${"${sessionNum}"} \u2014 ${"${fmtDate(s.started)}"}\`);
+    if (!isInProgress) {
+        summary.appendText(\` \u2192 ${"${fmtDate(s.finished)}"}\`);
     }
+    summary.appendText(\` (${"${dayCountVal}"}d, ${"${duration(totalSecs)}"}, ${"${pct(startPct)}"} \u2192 ${"${pct(endPct)}"})\`);
+    buildTable(details, days.slice().reverse());
     sessionNum--;
 }
 
 // Render "Other reading" if there are ungrouped days.
 if (otherDays.length > 0) {
     const otherSecs = otherDays.reduce((sum, d) => sum + d.duration_seconds, 0);
-    const rows = otherDays.slice().reverse().map(d => [fmtDate(d.date), pct(d.start_percent), pct(d.end_percent), duration(d.duration_seconds)]);
-    const details = dv.container.createEl("details");
-    details.createEl("summary", { text: \`Other reading (${"${otherDays.length}"}d, ${"${duration(otherSecs)}"})\` });
-    const table = details.createEl("table");
-    const thead = table.createEl("thead");
-    const headRow = thead.createEl("tr");
-    ["Date", "Start", "End", "Duration"].forEach(h => headRow.createEl("th", { text: h }));
-    const tbody = table.createEl("tbody");
-    for (const r of rows) {
-        const tr = tbody.createEl("tr");
-        r.forEach(c => tr.createEl("td", { text: c }));
-    }
+    const details = wrap.createEl("details", { cls: "tome-rh-session" });
+    const summary = details.createEl("summary");
+    summary.createEl("span", { cls: "tome-rh-badge tome-rh-badge-other", text: "Other" });
+    summary.appendText(\` Other reading (${"${otherDays.length}"}d, ${"${duration(otherSecs)}"})\`);
+    buildTable(details, otherDays.slice().reverse());
 }
 \`\`\``;
 
