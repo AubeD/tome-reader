@@ -278,9 +278,18 @@ export class LorebaseProgressSync {
 				if (isMissing(frontmatter.book_file) || asString(frontmatter.book_file) === "") {
 					frontmatter.book_file = epubFile.path;
 				}
-				// page_total is an estimate — fill missing only, never overwrite.
-				if (isMissing(frontmatter.page_total) && pageTotalForFill > 0) {
-					frontmatter.page_total = pageTotalForFill;
+				// page_total is an estimate — fill missing, and repair gross
+				// underestimates using the authoritative location-based estimate
+				// (same 2000 chars/page convention as the scanner, but computed
+				// from the full book via epub.js). In-the-ballpark values are
+				// preserved so user-set print-edition totals aren't clobbered.
+				if (pageTotalForFill > 0) {
+						const current = frontmatter.page_total;
+						if (isMissing(current)) {
+								frontmatter.page_total = pageTotalForFill;
+						} else if (typeof current === "number" && current > 0 && pageTotalForFill > current * 2) {
+								frontmatter.page_total = pageTotalForFill;
+						}
 				}
 				// chapter_total is derived from the actual TOC, which excludes
 				// cover/title pages the scanner's spine count includes — so
@@ -317,14 +326,25 @@ export class LorebaseProgressSync {
 
 	// Use an existing positive page_total as the source of truth; otherwise
 	// estimate from the generated location count using the scanner's
-	// chars-per-page convention.
+	// chars-per-page convention. When locations are available, the
+	// location-based estimate is computed from the full book via epub.js and
+	// uses the same 2000 chars/page convention as the scanner — so it is the
+	// authoritative version of the same metric the scanner only sampled. If
+	// the stored value is a gross underestimate (location-based > 2x stored),
+	// it is almost certainly a bad scanner sample (e.g. front-matter-only) and
+	// is repaired. User-set values in the right ballpark are preserved.
 	private resolvePageTotal(fm: Record<string, unknown> | undefined, locationCount: number): number {
 		const existing = fm?.page_total;
-		if (typeof existing === "number" && existing > 0) return existing;
-		if (locationCount > 0) {
-			return Math.max(1, Math.round((locationCount * CHARS_PER_LOCATION) / CHARS_PER_PAGE));
+		const locationBased = locationCount > 0
+				? Math.max(1, Math.round((locationCount * CHARS_PER_LOCATION) / CHARS_PER_PAGE))
+				: 0;
+		if (typeof existing === "number" && existing > 0) {
+				if (locationBased > 0 && locationBased > existing * 2) {
+						return locationBased;
+				}
+				return existing;
 		}
-		return 0;
+		return locationBased;
 	}
 }
 
